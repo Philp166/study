@@ -1,0 +1,15 @@
+# Конфиг для Render (Blueprint). На Render: New + → Blueprint → этот репозиторий.
+services:
+  - type: web
+    name: claude-chat
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # $PORT Render выдаёт сам — uvicorn должен слушать именно его.
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Секреты НЕ в коде. Значения задаются в дашборде Render.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

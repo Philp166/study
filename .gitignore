@@ -1,0 +1,25 @@
+# Секреты — никогда не коммитим
+.env
+.env.local
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# IDE / инструменты
+.vscode/
+.idea/
+.cursor/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
