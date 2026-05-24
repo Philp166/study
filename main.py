@@ -15,7 +15,7 @@ client = anthropic.Anthropic()
 
 # Шаг 4. Отправляем один запрос в Claude.
 response = client.messages.create(
-    model="claude-opus-4-7",
+    model="claude-opus-4-6",
     max_tokens=1024,
     messages=[
         {"role": "user", "content": "Привет! Объясни одним предложением, что такое AI-агент."}
