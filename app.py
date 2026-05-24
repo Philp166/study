@@ -46,6 +46,18 @@ app.add_middleware(
 )
 
 
+# Какие модели разрешены к выбору. Это и фильтр от мусора с публичного
+# эндпоинта (чтобы нельзя было прислать произвольный model id), и
+# единый источник правды о доступных моделях.
+ALLOWED_MODELS = {
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+}
+DEFAULT_MODEL = "claude-opus-4-6"
+
+
 # Одна реплика диалога: кто сказал (user/assistant) и что.
 class Message(BaseModel):
     role: str
@@ -55,6 +67,7 @@ class Message(BaseModel):
 # Фронт присылает всю историю — так Claude «помнит» предыдущие сообщения.
 class ChatRequest(BaseModel):
     messages: list[Message]
+    model: str | None = None
 
 
 # GET / — браузер заходит на эту страницу и получает HTML-файл.
@@ -66,9 +79,11 @@ def index():
 # POST /chat — фронт шлёт всю историю, мы спрашиваем Claude и возвращаем ответ.
 @app.post("/chat")
 def chat(req: ChatRequest):
+    # Если фронт прислал неизвестную модель — мягко падаем на дефолт.
+    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
     try:
         response = client.messages.create(
-            model="claude-opus-4-6",
+            model=model,
             # 1024 было для урока 1; для развёрнутых ответов и таблиц мало.
             max_tokens=8192,
             messages=[{"role": m.role, "content": m.content} for m in req.messages],

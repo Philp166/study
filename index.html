@@ -124,6 +124,33 @@
       align-items: center;
     }
 
+    .main-header {
+      width: 100%;
+      max-width: 768px;
+      padding: 12px 20px 0;
+      display: flex;
+      align-items: center;
+    }
+
+    .model-select {
+      appearance: none;
+      -webkit-appearance: none;
+      background-color: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 6px 30px 6px 14px;
+      font: inherit;
+      font-size: 14px;
+      color: var(--ink);
+      cursor: pointer;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .model-select:hover { background-color: #f4f4f4; }
+    .model-select:focus { outline: none; border-color: #d8d8d8; }
+
     #transcript {
       flex: 1;
       width: 100%;
@@ -331,6 +358,9 @@
     </aside>
 
     <main class="main">
+      <header class="main-header">
+        <select id="model-select" class="model-select" aria-label="Модель"></select>
+      </header>
       <div id="transcript"></div>
       <div id="composer">
         <div class="pill">
@@ -363,17 +393,35 @@
       "Придумай идеи для проекта",
     ];
 
+    // Модели в селекторе. id должны совпадать с ALLOWED_MODELS на бэкенде.
+    const MODELS = [
+      { id: "claude-opus-4-7",   label: "Claude Opus 4.7" },
+      { id: "claude-opus-4-6",   label: "Claude Opus 4.6" },
+      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+      { id: "claude-haiku-4-5",  label: "Claude Haiku 4.5" },
+    ];
+    const DEFAULT_MODEL = "claude-opus-4-6";
+
     // --- SVG-иконки ---
     const PIN_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h8l-2 5v3l3 2H7l3-2V9L8 4z"/><line x1="12" y1="14" x2="12" y2="20"/></svg>';
     const TRASH_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
 
     // --- Элементы страницы ---
-    const transcriptEl = document.getElementById("transcript");
-    const chatListEl   = document.getElementById("chat-list");
-    const inputEl      = document.getElementById("input");
-    const ghostEl      = document.getElementById("ghost");
-    const sendBtn      = document.getElementById("send");
-    const newChatBtn   = document.getElementById("new-chat");
+    const transcriptEl  = document.getElementById("transcript");
+    const chatListEl    = document.getElementById("chat-list");
+    const inputEl       = document.getElementById("input");
+    const ghostEl       = document.getElementById("ghost");
+    const sendBtn       = document.getElementById("send");
+    const newChatBtn    = document.getElementById("new-chat");
+    const modelSelectEl = document.getElementById("model-select");
+
+    // Один раз наполняем селектор опциями.
+    for (const m of MODELS) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      modelSelectEl.appendChild(opt);
+    }
 
     /* ========================================================
        Состояние и хранилище.
@@ -431,6 +479,10 @@
     }
 
     let state = loadState();
+    // У чатов из старой версии нет поля model — проставим дефолт.
+    for (const c of Object.values(state.chats)) {
+      if (!c.model) c.model = DEFAULT_MODEL;
+    }
 
     function saveState() {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
@@ -455,6 +507,8 @@
       state.chats[id] = {
         id, title: "", pinned: false,
         createdAt: now, updatedAt: now, messages: [],
+        // Новый чат наследует текущий выбор в селекторе.
+        model: modelSelectEl.value || DEFAULT_MODEL,
       };
       state.currentId = id;
       saveState();
@@ -559,7 +613,12 @@
       for (const m of chat.messages) addBubble(m.role, m.content);
     }
 
-    function renderAll() { renderSidebar(); renderTranscript(); }
+    function syncModelSelect() {
+      const c = currentChat();
+      modelSelectEl.value = (c && c.model) || DEFAULT_MODEL;
+    }
+
+    function renderAll() { renderSidebar(); renderTranscript(); syncModelSelect(); }
 
     /* ========================================================
        Markdown и сообщения
@@ -650,7 +709,7 @@
         const res = await fetch(API_BASE + "/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: chat.messages }),
+          body: JSON.stringify({ messages: chat.messages, model: chat.model }),
         });
         const data = await res.json();
         typingEl.innerHTML = renderMarkdown(data.reply);
@@ -669,6 +728,14 @@
 
     sendBtn.addEventListener("click", send);
     newChatBtn.addEventListener("click", newChat);
+
+    // Смена модели в селекторе — сохраняем на текущем чате.
+    modelSelectEl.addEventListener("change", () => {
+      const c = currentChat();
+      if (!c) return;
+      c.model = modelSelectEl.value;
+      saveState();
+    });
 
     // Enter — отправить, Shift+Enter — перенос строки.
     inputEl.addEventListener("keydown", (e) => {
