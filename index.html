@@ -205,7 +205,8 @@
     const sendBtn = document.getElementById("send");
 
     // Вся история диалога. Её целиком отправляем на бэкенд каждый раз.
-    const history = [];
+    // Храним в localStorage, чтобы переживала обновление страницы.
+    let history = [];
 
     /* ---------- Анимированный плейсхолдер ---------- */
     let phraseIdx = 0;
@@ -262,6 +263,7 @@
 
       addBubble("user", text);
       history.push({ role: "user", content: text });
+      saveHistory();
 
       inputEl.value = "";
       inputEl.style.height = "auto";
@@ -279,6 +281,7 @@
         const data = await res.json();
         typingEl.textContent = data.reply;
         history.push({ role: "assistant", content: data.reply });
+        saveHistory();
       } catch (e) {
         typingEl.textContent = "Не удалось связаться с сервером: " + e;
       } finally {
@@ -296,6 +299,20 @@
         send();
       }
     });
+
+    /* ---------- Восстановление истории из localStorage ---------- */
+    const STORAGE_KEY = "claude_chat_history";
+    try {
+      history = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    } catch { history = []; }
+
+    function saveHistory() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); }
+      catch {}
+    }
+
+    // Рисуем сохранённые сообщения на экране при загрузке страницы.
+    for (const m of history) addBubble(m.role, m.content);
   </script>
 </body>
 </html>
