@@ -16,6 +16,9 @@
       --muted: #8a8a8a;
       --card: #ffffff;
       --border: #ececec;
+      --sidebar-bg: #f4f4f4;
+      --accent: #f59e0b;
+      --danger: #dc2626;
     }
 
     body {
@@ -23,12 +26,104 @@
       background: var(--bg);
       color: var(--ink);
       height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ===== Раскладка: сайдбар слева, основная зона справа ===== */
+    .layout { display: flex; height: 100%; }
+
+    .sidebar {
+      width: 260px;
+      flex-shrink: 0;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar-header { padding: 12px; border-bottom: 1px solid var(--border); }
+
+    .new-chat-btn {
+      width: 100%;
+      border: 0;
+      background: var(--ink);
+      color: #fff;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s ease;
+    }
+    .new-chat-btn:hover { background: #333; }
+
+    .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .chat-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #333;
+      transition: background 0.1s ease;
+    }
+    .chat-item:hover  { background: rgba(0,0,0,0.05); }
+    .chat-item.active { background: rgba(0,0,0,0.1); }
+
+    .chat-item-title {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chat-item-actions { display: flex; gap: 2px; flex-shrink: 0; }
+
+    .icon-btn {
+      width: 26px;
+      height: 26px;
+      border: 0;
+      background: transparent;
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: background 0.1s ease, color 0.1s ease, opacity 0.15s ease;
+    }
+    .icon-btn:hover { background: rgba(0,0,0,0.08); color: var(--ink); }
+
+    .pin-btn, .trash-btn { opacity: 0; }
+    .chat-item:hover .pin-btn,
+    .chat-item:hover .trash-btn { opacity: 1; }
+    .trash-btn:hover { color: var(--danger); }
+    .chat-item.pinned .pin-btn { opacity: 1; color: var(--accent); }
+
+    /* ===== Основная зона: лента сообщений + поле ввода ===== */
+    .main {
+      flex: 1;
+      min-width: 0;
       display: flex;
       flex-direction: column;
       align-items: center;
     }
 
-    /* Лента сообщений */
     #transcript {
       flex: 1;
       width: 100%;
@@ -59,6 +154,20 @@
       animation: rise 0.25s ease;
     }
     .msg.user { white-space: pre-wrap; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--ink);
+      color: #fff;
+      border-bottom-right-radius: 6px;
+    }
+    .msg.bot {
+      align-self: flex-start;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
 
     /* Стили для отрендеренного markdown внутри пузыря бота */
     .msg.bot > *:first-child { margin-top: 0; }
@@ -114,20 +223,6 @@
       text-align: left;
     }
     .msg.bot th { background: #f6f6f6; font-weight: 600; }
-    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-
-    .msg.user {
-      align-self: flex-end;
-      background: var(--ink);
-      color: #fff;
-      border-bottom-right-radius: 6px;
-    }
-    .msg.bot {
-      align-self: flex-start;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-bottom-left-radius: 6px;
-    }
 
     /* Индикатор "печатает" */
     .dots { display: inline-flex; gap: 5px; padding: 4px 2px; }
@@ -179,7 +274,6 @@
       padding: 9px 0;
     }
 
-    /* Анимированный плейсхолдер поверх поля */
     #ghost {
       position: absolute;
       left: 0;
@@ -214,38 +308,51 @@
     #send:hover:not(:disabled) { background: #333; }
     #send:active:not(:disabled) { transform: scale(0.94); }
     #send:disabled { background: #cfcfcf; cursor: default; }
+
+    /* На узких экранах сайдбар прячем */
+    @media (max-width: 640px) {
+      .sidebar { display: none; }
+    }
   </style>
 </head>
 <body>
-  <div id="transcript">
-    <div id="empty">
-      <strong>Чат с Claude</strong>
-      Напиши сообщение — Claude помнит весь диалог.
-    </div>
-  </div>
-
-  <div id="composer">
-    <div class="pill">
-      <div class="field">
-        <textarea id="input" rows="1" autocomplete="off"></textarea>
-        <div id="ghost"></div>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <button id="new-chat" class="new-chat-btn" type="button">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Новый чат
+        </button>
       </div>
-      <button id="send" aria-label="Отправить">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2.2"
-             stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 19V5" />
-          <path d="M5 12l7-7 7 7" />
-        </svg>
-      </button>
-    </div>
+      <div id="chat-list" class="chat-list"></div>
+    </aside>
+
+    <main class="main">
+      <div id="transcript"></div>
+      <div id="composer">
+        <div class="pill">
+          <div class="field">
+            <textarea id="input" rows="1" autocomplete="off"></textarea>
+            <div id="ghost"></div>
+          </div>
+          <button id="send" aria-label="Отправить">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2.2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 19V5" />
+              <path d="M5 12l7-7 7 7" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </main>
   </div>
 
   <script>
-    // Адрес бэкенда. Фронт и бэк на РАЗНЫХ адресах, поэтому когда выложишь
-    // бэкенд на Render — впиши сюда его URL, например:
-    //   const API_BASE = "https://study-xxxx.onrender.com";
-    // Пустая строка = тот же адрес (работает при локальном запуске uvicorn).
+    // Адрес бэкенда. Пустая строка = тот же домен.
     const API_BASE = "";
 
     const PLACEHOLDERS = [
@@ -256,17 +363,241 @@
       "Придумай идеи для проекта",
     ];
 
+    // --- SVG-иконки ---
+    const PIN_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h8l-2 5v3l3 2H7l3-2V9L8 4z"/><line x1="12" y1="14" x2="12" y2="20"/></svg>';
+    const TRASH_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+
+    // --- Элементы страницы ---
     const transcriptEl = document.getElementById("transcript");
-    const emptyEl = document.getElementById("empty");
-    const inputEl = document.getElementById("input");
-    const ghostEl = document.getElementById("ghost");
-    const sendBtn = document.getElementById("send");
+    const chatListEl   = document.getElementById("chat-list");
+    const inputEl      = document.getElementById("input");
+    const ghostEl      = document.getElementById("ghost");
+    const sendBtn      = document.getElementById("send");
+    const newChatBtn   = document.getElementById("new-chat");
 
-    // Вся история диалога. Её целиком отправляем на бэкенд каждый раз.
-    // Храним в localStorage, чтобы переживала обновление страницы.
-    let history = [];
+    /* ========================================================
+       Состояние и хранилище.
+       Структура localStorage["claude_chat_v2"]:
+       {
+         currentId: "...",
+         chats: {
+           "id1": { id, title, pinned, createdAt, updatedAt, messages: [...] },
+           ...
+         }
+       }
+       ======================================================== */
+    const STORAGE_KEY = "claude_chat_v2";
+    const OLD_KEY     = "claude_chat_history";
 
-    /* ---------- Анимированный плейсхолдер ---------- */
+    function newId() {
+      return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+
+    function deriveTitle(text) {
+      const t = (text || "").trim().replace(/\s+/g, " ");
+      if (!t) return "";
+      return t.length > 40 ? t.slice(0, 40) + "…" : t;
+    }
+
+    function loadState() {
+      // 1. Пробуем новый формат.
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const s = JSON.parse(raw);
+          if (s && s.chats && s.currentId && s.chats[s.currentId]) return s;
+        }
+      } catch {}
+
+      // 2. Миграция со старого формата (одна история без чатов).
+      let oldMessages = [];
+      try { oldMessages = JSON.parse(localStorage.getItem(OLD_KEY) || "[]"); } catch {}
+      try { localStorage.removeItem(OLD_KEY); } catch {}
+
+      const id = newId();
+      const now = Date.now();
+      const firstUser = oldMessages.find(m => m.role === "user");
+      return {
+        currentId: id,
+        chats: {
+          [id]: {
+            id, pinned: false,
+            title: firstUser ? deriveTitle(firstUser.content) : "",
+            createdAt: now, updatedAt: now,
+            messages: oldMessages,
+          },
+        },
+      };
+    }
+
+    let state = loadState();
+
+    function saveState() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+    }
+
+    function currentChat() { return state.chats[state.currentId]; }
+
+    function sortedChats() {
+      return Object.values(state.chats).sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return b.updatedAt - a.updatedAt;
+      });
+    }
+
+    function newChat() {
+      // Если уже есть пустой чат без сообщений — переключимся на него вместо дубля.
+      for (const c of Object.values(state.chats)) {
+        if (c.messages.length === 0) { switchChat(c.id); return; }
+      }
+      const id = newId();
+      const now = Date.now();
+      state.chats[id] = {
+        id, title: "", pinned: false,
+        createdAt: now, updatedAt: now, messages: [],
+      };
+      state.currentId = id;
+      saveState();
+      renderAll();
+      inputEl.focus();
+    }
+
+    function switchChat(id) {
+      if (!state.chats[id]) return;
+      state.currentId = id;
+      saveState();
+      renderAll();
+    }
+
+    function deleteChat(id) {
+      if (!confirm("Удалить этот чат? Действие нельзя отменить.")) return;
+      delete state.chats[id];
+      if (state.currentId === id) {
+        const next = sortedChats()[0];
+        if (next) {
+          state.currentId = next.id;
+        } else {
+          // Не оставляем пустого состояния — создаём новый пустой чат.
+          const nid = newId();
+          const now = Date.now();
+          state.chats[nid] = { id: nid, title: "", pinned: false, createdAt: now, updatedAt: now, messages: [] };
+          state.currentId = nid;
+        }
+      }
+      saveState();
+      renderAll();
+    }
+
+    function togglePin(id) {
+      const c = state.chats[id];
+      if (!c) return;
+      c.pinned = !c.pinned;
+      saveState();
+      renderSidebar();
+    }
+
+    /* ========================================================
+       Рендеринг
+       ======================================================== */
+    function renderSidebar() {
+      chatListEl.innerHTML = "";
+      for (const c of sortedChats()) {
+        const item = document.createElement("div");
+        item.className = "chat-item"
+          + (c.id === state.currentId ? " active" : "")
+          + (c.pinned ? " pinned" : "");
+
+        const title = document.createElement("div");
+        title.className = "chat-item-title";
+        title.textContent = c.title || "Новый чат";
+        item.appendChild(title);
+
+        const actions = document.createElement("div");
+        actions.className = "chat-item-actions";
+
+        const pinBtn = document.createElement("button");
+        pinBtn.className = "icon-btn pin-btn";
+        pinBtn.type = "button";
+        pinBtn.title = c.pinned ? "Открепить" : "Закрепить";
+        pinBtn.innerHTML = PIN_SVG;
+        pinBtn.addEventListener("click", (e) => { e.stopPropagation(); togglePin(c.id); });
+
+        const trashBtn = document.createElement("button");
+        trashBtn.className = "icon-btn trash-btn";
+        trashBtn.type = "button";
+        trashBtn.title = "Удалить";
+        trashBtn.innerHTML = TRASH_SVG;
+        trashBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteChat(c.id); });
+
+        actions.appendChild(pinBtn);
+        actions.appendChild(trashBtn);
+        item.appendChild(actions);
+
+        item.addEventListener("click", () => switchChat(c.id));
+
+        chatListEl.appendChild(item);
+      }
+    }
+
+    function showEmptyState() {
+      const empty = document.createElement("div");
+      empty.id = "empty";
+      const strong = document.createElement("strong");
+      strong.textContent = "Чат с Claude";
+      empty.appendChild(strong);
+      empty.appendChild(document.createTextNode("Напиши сообщение — Claude помнит весь диалог."));
+      transcriptEl.appendChild(empty);
+    }
+
+    function renderTranscript() {
+      transcriptEl.innerHTML = "";
+      const chat = currentChat();
+      if (!chat || chat.messages.length === 0) {
+        showEmptyState();
+        return;
+      }
+      for (const m of chat.messages) addBubble(m.role, m.content);
+    }
+
+    function renderAll() { renderSidebar(); renderTranscript(); }
+
+    /* ========================================================
+       Markdown и сообщения
+       ======================================================== */
+    function renderMarkdown(text) {
+      return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
+    }
+
+    function addBubble(role, text) {
+      const empty = transcriptEl.querySelector("#empty");
+      if (empty) empty.remove();
+
+      const el = document.createElement("div");
+      el.className = "msg " + (role === "user" ? "user" : "bot");
+      if (role === "user") {
+        el.textContent = text; // пользовательский ввод — без markdown
+      } else {
+        el.innerHTML = renderMarkdown(text);
+      }
+      transcriptEl.appendChild(el);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return el;
+    }
+
+    function showTyping() {
+      const empty = transcriptEl.querySelector("#empty");
+      if (empty) empty.remove();
+      const el = document.createElement("div");
+      el.className = "msg bot";
+      el.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
+      transcriptEl.appendChild(el);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return el;
+    }
+
+    /* ========================================================
+       Анимированный плейсхолдер
+       ======================================================== */
     let phraseIdx = 0;
     ghostEl.textContent = PLACEHOLDERS[0];
 
@@ -288,51 +619,25 @@
     inputEl.addEventListener("blur", refreshGhost);
     inputEl.addEventListener("input", () => {
       refreshGhost();
-      // Авто-высота поля под текст.
       inputEl.style.height = "auto";
       inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
     });
 
-    /* ---------- Отрисовка сообщений ---------- */
-    // Markdown → HTML с очисткой от опасных тегов.
-    function renderMarkdown(text) {
-      return DOMPurify.sanitize(
-        marked.parse(text || "", { breaks: true, gfm: true })
-      );
-    }
-
-    function addBubble(role, text) {
-      if (emptyEl) emptyEl.remove();
-      const el = document.createElement("div");
-      el.className = "msg " + (role === "user" ? "user" : "bot");
-      if (role === "user") {
-        el.textContent = text; // пользовательский ввод — без markdown
-      } else {
-        el.innerHTML = renderMarkdown(text);
-      }
-      transcriptEl.appendChild(el);
-      transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      return el;
-    }
-
-    function showTyping() {
-      if (emptyEl) emptyEl.remove();
-      const el = document.createElement("div");
-      el.className = "msg bot";
-      el.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
-      transcriptEl.appendChild(el);
-      transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      return el;
-    }
-
-    /* ---------- Отправка ---------- */
+    /* ========================================================
+       Отправка сообщения
+       ======================================================== */
     async function send() {
       const text = inputEl.value.trim();
       if (!text) return;
+      const chat = currentChat();
+      if (!chat) return;
 
       addBubble("user", text);
-      history.push({ role: "user", content: text });
-      saveHistory();
+      chat.messages.push({ role: "user", content: text });
+      chat.updatedAt = Date.now();
+      if (!chat.title) chat.title = deriveTitle(text);
+      saveState();
+      renderSidebar();
 
       inputEl.value = "";
       inputEl.style.height = "auto";
@@ -345,12 +650,14 @@
         const res = await fetch(API_BASE + "/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history }),
+          body: JSON.stringify({ messages: chat.messages }),
         });
         const data = await res.json();
         typingEl.innerHTML = renderMarkdown(data.reply);
-        history.push({ role: "assistant", content: data.reply });
-        saveHistory();
+        chat.messages.push({ role: "assistant", content: data.reply });
+        chat.updatedAt = Date.now();
+        saveState();
+        renderSidebar();
       } catch (e) {
         typingEl.textContent = "Не удалось связаться с сервером: " + e;
       } finally {
@@ -361,6 +668,8 @@
     }
 
     sendBtn.addEventListener("click", send);
+    newChatBtn.addEventListener("click", newChat);
+
     // Enter — отправить, Shift+Enter — перенос строки.
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -369,19 +678,8 @@
       }
     });
 
-    /* ---------- Восстановление истории из localStorage ---------- */
-    const STORAGE_KEY = "claude_chat_history";
-    try {
-      history = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-    } catch { history = []; }
-
-    function saveHistory() {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); }
-      catch {}
-    }
-
-    // Рисуем сохранённые сообщения на экране при загрузке страницы.
-    for (const m of history) addBubble(m.role, m.content);
+    // Первоначальная отрисовка
+    renderAll();
   </script>
 </body>
 </html>

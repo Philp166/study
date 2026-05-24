@@ -69,7 +69,8 @@ def chat(req: ChatRequest):
     try:
         response = client.messages.create(
             model="claude-opus-4-7",
-            max_tokens=1024,
+            # 1024 было для урока 1; для развёрнутых ответов и таблиц мало.
+            max_tokens=8192,
             messages=[{"role": m.role, "content": m.content} for m in req.messages],
         )
         text = "".join(
