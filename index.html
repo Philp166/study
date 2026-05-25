@@ -408,8 +408,7 @@
   </div>
 
   <script>
-    // Адрес бэкенда. Пустая строка = тот же домен.
-    const API_BASE = "";
+    const API = "";
 
     const PLACEHOLDERS = [
       "Спроси что-нибудь у Claude…",
@@ -419,7 +418,6 @@
       "Придумай идеи для проекта",
     ];
 
-    // Модели в селекторе. id должны совпадать с ALLOWED_MODELS на бэкенде.
     const MODELS = [
       { id: "claude-opus-4-7",   label: "Claude Opus 4.7" },
       { id: "claude-opus-4-6",   label: "Claude Opus 4.6" },
@@ -428,11 +426,9 @@
     ];
     const DEFAULT_MODEL = "claude-opus-4-6";
 
-    // --- SVG-иконки ---
     const PIN_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h8l-2 5v3l3 2H7l3-2V9L8 4z"/><line x1="12" y1="14" x2="12" y2="20"/></svg>';
     const TRASH_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
 
-    // --- Элементы страницы ---
     const transcriptEl  = document.getElementById("transcript");
     const chatListEl    = document.getElementById("chat-list");
     const inputEl       = document.getElementById("input");
@@ -441,7 +437,6 @@
     const newChatBtn    = document.getElementById("new-chat");
     const modelSelectEl = document.getElementById("model-select");
 
-    // Один раз наполняем селектор опциями.
     for (const m of MODELS) {
       const opt = document.createElement("option");
       opt.value = m.id;
@@ -450,22 +445,11 @@
     }
 
     /* ========================================================
-       Состояние и хранилище.
-       Структура localStorage["claude_chat_v2"]:
-       {
-         currentId: "...",
-         chats: {
-           "id1": { id, title, pinned, createdAt, updatedAt, messages: [...] },
-           ...
-         }
-       }
+       State: server-backed via /api/chats
        ======================================================== */
-    const STORAGE_KEY = "claude_chat_v2";
-    const OLD_KEY     = "claude_chat_history";
-
-    function newId() {
-      return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    }
+    let chatsList = [];
+    let currentId = null;
+    let currentMessages = [];
 
     function deriveTitle(text) {
       const t = (text || "").trim().replace(/\s+/g, " ");
@@ -473,118 +457,80 @@
       return t.length > 40 ? t.slice(0, 40) + "…" : t;
     }
 
-    function loadState() {
-      // 1. Пробуем новый формат.
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const s = JSON.parse(raw);
-          if (s && s.chats && s.currentId && s.chats[s.currentId]) return s;
-        }
-      } catch {}
-
-      // 2. Миграция со старого формата (одна история без чатов).
-      let oldMessages = [];
-      try { oldMessages = JSON.parse(localStorage.getItem(OLD_KEY) || "[]"); } catch {}
-      try { localStorage.removeItem(OLD_KEY); } catch {}
-
-      const id = newId();
-      const now = Date.now();
-      const firstUser = oldMessages.find(m => m.role === "user");
-      return {
-        currentId: id,
-        chats: {
-          [id]: {
-            id, pinned: false,
-            title: firstUser ? deriveTitle(firstUser.content) : "",
-            createdAt: now, updatedAt: now,
-            messages: oldMessages,
-          },
-        },
-      };
+    async function api(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      return res.json();
     }
 
-    let state = loadState();
-    // У чатов из старой версии нет поля model — проставим дефолт.
-    for (const c of Object.values(state.chats)) {
-      if (!c.model) c.model = DEFAULT_MODEL;
-    }
-
-    function saveState() {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-    }
-
-    function currentChat() { return state.chats[state.currentId]; }
-
-    function sortedChats() {
-      return Object.values(state.chats).sort((a, b) => {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-        return b.updatedAt - a.updatedAt;
-      });
-    }
-
-    function newChat() {
-      // Если уже есть пустой чат без сообщений — переключимся на него вместо дубля.
-      for (const c of Object.values(state.chats)) {
-        if (c.messages.length === 0) { switchChat(c.id); return; }
+    async function loadChats() {
+      chatsList = await api("GET", "/api/chats");
+      if (chatsList.length === 0) {
+        const { id } = await api("POST", "/api/chats", { model: DEFAULT_MODEL });
+        chatsList = await api("GET", "/api/chats");
       }
-      const id = newId();
-      const now = Date.now();
-      state.chats[id] = {
-        id, title: "", pinned: false,
-        createdAt: now, updatedAt: now, messages: [],
-        // Новый чат наследует текущий выбор в селекторе.
-        model: modelSelectEl.value || DEFAULT_MODEL,
-      };
-      state.currentId = id;
-      saveState();
+      if (!currentId || !chatsList.find(c => c.id === currentId)) {
+        currentId = chatsList[0].id;
+      }
+    }
+
+    async function loadCurrentChat() {
+      const data = await api("GET", `/api/chats/${currentId}`);
+      currentMessages = data.messages || [];
+    }
+
+    function currentChatMeta() {
+      return chatsList.find(c => c.id === currentId);
+    }
+
+    async function createNewChat() {
+      const empty = chatsList.find(c => !c.title);
+      if (empty) {
+        await switchChat(empty.id);
+        return;
+      }
+      const model = modelSelectEl.value || DEFAULT_MODEL;
+      const { id } = await api("POST", "/api/chats", { model });
+      currentId = id;
+      await loadChats();
+      currentMessages = [];
       renderAll();
       inputEl.focus();
     }
 
-    function switchChat(id) {
-      if (!state.chats[id]) return;
-      state.currentId = id;
-      saveState();
+    async function switchChat(id) {
+      currentId = id;
+      await loadCurrentChat();
       renderAll();
     }
 
-    function deleteChat(id) {
+    async function deleteChat(id) {
       if (!confirm("Удалить этот чат? Действие нельзя отменить.")) return;
-      delete state.chats[id];
-      if (state.currentId === id) {
-        const next = sortedChats()[0];
-        if (next) {
-          state.currentId = next.id;
-        } else {
-          // Не оставляем пустого состояния — создаём новый пустой чат.
-          const nid = newId();
-          const now = Date.now();
-          state.chats[nid] = { id: nid, title: "", pinned: false, createdAt: now, updatedAt: now, messages: [] };
-          state.currentId = nid;
-        }
-      }
-      saveState();
+      await api("DELETE", `/api/chats/${id}`);
+      if (currentId === id) currentId = null;
+      await loadChats();
+      await loadCurrentChat();
       renderAll();
     }
 
-    function togglePin(id) {
-      const c = state.chats[id];
+    async function togglePin(id) {
+      const c = chatsList.find(c => c.id === id);
       if (!c) return;
-      c.pinned = !c.pinned;
-      saveState();
+      await api("PATCH", `/api/chats/${id}`, { pinned: !c.pinned });
+      await loadChats();
       renderSidebar();
     }
 
     /* ========================================================
-       Рендеринг
+       Rendering
        ======================================================== */
     function renderSidebar() {
       chatListEl.innerHTML = "";
-      for (const c of sortedChats()) {
+      for (const c of chatsList) {
         const item = document.createElement("div");
         item.className = "chat-item"
-          + (c.id === state.currentId ? " active" : "")
+          + (c.id === currentId ? " active" : "")
           + (c.pinned ? " pinned" : "");
 
         const title = document.createElement("div");
@@ -631,23 +577,22 @@
 
     function renderTranscript() {
       transcriptEl.innerHTML = "";
-      const chat = currentChat();
-      if (!chat || chat.messages.length === 0) {
+      if (currentMessages.length === 0) {
         showEmptyState();
         return;
       }
-      for (const m of chat.messages) addBubble(m.role, m.content);
+      for (const m of currentMessages) addBubble(m.role, m.content);
     }
 
     function syncModelSelect() {
-      const c = currentChat();
+      const c = currentChatMeta();
       modelSelectEl.value = (c && c.model) || DEFAULT_MODEL;
     }
 
     function renderAll() { renderSidebar(); renderTranscript(); syncModelSelect(); }
 
     /* ========================================================
-       Markdown и сообщения
+       Markdown
        ======================================================== */
     function renderMarkdown(text) {
       return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
@@ -660,7 +605,7 @@
       const el = document.createElement("div");
       el.className = "msg " + (role === "user" ? "user" : "bot");
       if (role === "user") {
-        el.textContent = text; // пользовательский ввод — без markdown
+        el.textContent = text;
       } else {
         el.innerHTML = renderMarkdown(text);
       }
@@ -681,7 +626,7 @@
     }
 
     /* ========================================================
-       Анимированный плейсхолдер
+       Animated placeholder
        ======================================================== */
     let phraseIdx = 0;
     ghostEl.textContent = PLACEHOLDERS[0];
@@ -709,20 +654,24 @@
     });
 
     /* ========================================================
-       Отправка сообщения
+       Send message
        ======================================================== */
     async function send() {
       const text = inputEl.value.trim();
-      if (!text) return;
-      const chat = currentChat();
-      if (!chat) return;
+      if (!text || !currentId) return;
 
       addBubble("user", text);
-      chat.messages.push({ role: "user", content: text });
-      chat.updatedAt = Date.now();
-      if (!chat.title) chat.title = deriveTitle(text);
-      saveState();
-      renderSidebar();
+      currentMessages.push({ role: "user", content: text });
+
+      await api("POST", `/api/chats/${currentId}/messages`, { role: "user", content: text });
+
+      const meta = currentChatMeta();
+      if (meta && !meta.title) {
+        const title = deriveTitle(text);
+        await api("PATCH", `/api/chats/${currentId}`, { title });
+        await loadChats();
+        renderSidebar();
+      }
 
       inputEl.value = "";
       inputEl.style.height = "auto";
@@ -733,10 +682,10 @@
       let fullText = "";
 
       try {
-        const res = await fetch(API_BASE + "/chat/stream", {
+        const res = await fetch(API + "/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: chat.messages, model: chat.model }),
+          body: JSON.stringify({ chat_id: currentId, model: meta?.model }),
         });
 
         const reader = res.body.getReader();
@@ -768,9 +717,8 @@
         }
 
         if (fullText) {
-          chat.messages.push({ role: "assistant", content: fullText });
-          chat.updatedAt = Date.now();
-          saveState();
+          currentMessages.push({ role: "assistant", content: fullText });
+          await loadChats();
           renderSidebar();
         }
       } catch (e) {
@@ -783,17 +731,15 @@
     }
 
     sendBtn.addEventListener("click", send);
-    newChatBtn.addEventListener("click", newChat);
+    newChatBtn.addEventListener("click", createNewChat);
 
-    // Смена модели в селекторе — сохраняем на текущем чате.
     modelSelectEl.addEventListener("change", () => {
-      const c = currentChat();
-      if (!c) return;
-      c.model = modelSelectEl.value;
-      saveState();
+      if (!currentId) return;
+      api("PATCH", `/api/chats/${currentId}`, { model: modelSelectEl.value });
+      const c = currentChatMeta();
+      if (c) c.model = modelSelectEl.value;
     });
 
-    // Enter — отправить, Shift+Enter — перенос строки.
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -801,8 +747,74 @@
       }
     });
 
-    // Первоначальная отрисовка
-    renderAll();
+    /* ========================================================
+       Migration from localStorage → server
+       ======================================================== */
+    async function migrateFromLocalStorage() {
+      const STORAGE_KEY = "claude_chat_v2";
+      const OLD_KEY = "claude_chat_history";
+      let raw = null;
+
+      try { raw = localStorage.getItem(STORAGE_KEY); } catch {}
+      if (!raw) {
+        try {
+          const oldRaw = localStorage.getItem(OLD_KEY);
+          if (oldRaw) {
+            const msgs = JSON.parse(oldRaw);
+            if (msgs.length > 0) {
+              const now = Date.now();
+              const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+              raw = JSON.stringify({
+                currentId: id,
+                chats: { [id]: { id, title: "", pinned: false, createdAt: now, updatedAt: now, messages: msgs, model: DEFAULT_MODEL } }
+              });
+            }
+          }
+        } catch {}
+      }
+
+      if (!raw) return;
+
+      try {
+        const state = JSON.parse(raw);
+        if (!state || !state.chats) return;
+
+        const chats = Object.values(state.chats)
+          .filter(c => c.messages && c.messages.length > 0)
+          .map(c => ({
+            id: c.id,
+            title: c.title || "",
+            pinned: !!c.pinned,
+            model: c.model || DEFAULT_MODEL,
+            createdAt: c.createdAt || Date.now(),
+            updatedAt: c.updatedAt || Date.now(),
+            messages: c.messages,
+          }));
+
+        if (chats.length === 0) {
+          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(OLD_KEY);
+          return;
+        }
+
+        await api("POST", "/api/migrate", { chats });
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(OLD_KEY);
+        console.log(`Migrated ${chats.length} chat(s) to server.`);
+      } catch (e) {
+        console.error("Migration failed:", e);
+      }
+    }
+
+    /* ========================================================
+       Init
+       ======================================================== */
+    (async () => {
+      await migrateFromLocalStorage();
+      await loadChats();
+      await loadCurrentChat();
+      renderAll();
+    })();
   </script>
 </body>
 </html>

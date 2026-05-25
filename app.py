@@ -16,6 +16,7 @@ from pydantic import BaseModel
 import anthropic
 
 from agent import Agent
+import db
 
 BASE_DIR = Path(__file__).parent
 
@@ -26,6 +27,8 @@ if not os.getenv("ANTHROPIC_API_KEY"):
 
 client = anthropic.Anthropic()
 cos_agent = Agent(client)
+
+db.init_db()
 
 app = FastAPI()
 
@@ -120,36 +123,127 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
+class StreamRequest(BaseModel):
+    chat_id: str
+    model: str | None = None
+
+
 class VoiceChatRequest(BaseModel):
     text: str
-    messages: list[Message]
+    chat_id: str | None = None
+    messages: list[Message] = []
 
+
+class ChatCreateRequest(BaseModel):
+    title: str = ""
+    model: str = DEFAULT_MODEL
+
+
+class ChatUpdateRequest(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+    model: str | None = None
+
+
+class MigrateChat(BaseModel):
+    id: str
+    title: str = ""
+    pinned: bool = False
+    model: str = DEFAULT_MODEL
+    createdAt: float
+    updatedAt: float
+    messages: list[Message] = []
+
+
+class MigrateRequest(BaseModel):
+    chats: list[MigrateChat]
+
+
+# ── Pages ──
 
 @app.get("/")
 def index():
     return FileResponse(BASE_DIR / "index.html")
 
 
-@app.post("/chat")
-def chat(req: ChatRequest):
-    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
-    try:
-        messages = [{"role": m.role, "content": m.content} for m in req.messages]
-        text = cos_agent.respond(messages, model=model)
-        return {"reply": text}
-    except anthropic.APIError as e:
-        return {"reply": f"Ошибка обращения к Claude: {e}"}
+# ── Chat CRUD API ──
 
+@app.get("/api/chats")
+def api_list_chats():
+    return db.list_chats()
+
+
+@app.post("/api/chats")
+def api_create_chat(req: ChatCreateRequest):
+    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+    cid = db.create_chat(title=req.title, model=model)
+    return {"id": cid}
+
+
+@app.get("/api/chats/{chat_id}")
+def api_get_chat(chat_id: str):
+    chat = db.get_chat(chat_id)
+    if not chat:
+        return {"error": "not_found"}
+    return chat
+
+
+@app.patch("/api/chats/{chat_id}")
+def api_update_chat(chat_id: str, req: ChatUpdateRequest):
+    fields = {}
+    if req.title is not None:
+        fields["title"] = req.title
+    if req.pinned is not None:
+        fields["pinned"] = req.pinned
+    if req.model is not None:
+        fields["model"] = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+    if fields:
+        db.update_chat(chat_id, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/chats/{chat_id}")
+def api_delete_chat(chat_id: str):
+    db.delete_chat(chat_id)
+    return {"ok": True}
+
+
+@app.post("/api/chats/{chat_id}/messages")
+def api_add_message(chat_id: str, msg: Message):
+    db.add_message(chat_id, msg.role, msg.content)
+    return {"ok": True}
+
+
+@app.post("/api/migrate")
+def api_migrate(req: MigrateRequest):
+    for c in req.chats:
+        msgs = [{"role": m.role, "content": m.content} for m in c.messages]
+        db.import_chat(
+            chat_id=c.id, title=c.title, pinned=c.pinned,
+            model=c.model if c.model in ALLOWED_MODELS else DEFAULT_MODEL,
+            created_at=c.createdAt / 1000, updated_at=c.updatedAt / 1000,
+            messages=msgs,
+        )
+    return {"ok": True, "imported": len(req.chats)}
+
+
+# ── LLM Streaming (now with chat_id) ──
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
-    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+async def chat_stream(req: StreamRequest):
+    chat = db.get_chat(req.chat_id)
+    if not chat:
+        return {"error": "chat not found"}
+    model = req.model if req.model in ALLOWED_MODELS else chat.get("model", DEFAULT_MODEL)
+    messages = chat["messages"]
 
     def generate():
+        full_text = ""
         try:
             for chunk in cos_agent.respond_stream(messages, model=model):
+                full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
+            db.add_message(req.chat_id, "assistant", full_text)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -162,37 +256,20 @@ def voice_page():
     return FileResponse(BASE_DIR / "voice.html")
 
 
-@app.post("/voice/chat")
-async def voice_chat(req: VoiceChatRequest):
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
-    messages.append({"role": "user", "content": req.text})
-
-    from agent import SYSTEM_PROMPT
-    voice_system = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
-
-    try:
-        reply_text = cos_agent.respond(
-            messages, model=VOICE_MODEL, max_tokens=VOICE_MAX_TOKENS,
-            system_prompt=voice_system,
-        )
-    except Exception as e:
-        return {"error": f"Ошибка агента: {e}"}
-
-    reply_audio_b64 = await tts_text(reply_text)
-
-    return {
-        "reply_text": reply_text,
-        "reply_audio": reply_audio_b64,
-    }
-
-
 @app.post("/voice/chat/stream")
 async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
     voice_system = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
 
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    if req.chat_id:
+        chat = db.get_chat(req.chat_id)
+        messages = chat["messages"] if chat else []
+    else:
+        messages = [{"role": m.role, "content": m.content} for m in req.messages]
     messages.append({"role": "user", "content": req.text})
+
+    if req.chat_id:
+        db.add_message(req.chat_id, "user", req.text)
 
     async def generate():
         text_queue: asyncio.Queue = asyncio.Queue()
@@ -232,6 +309,8 @@ async def voice_chat_stream(req: VoiceChatRequest):
                     audio = await tts_text(sentence_buffer.strip())
                     if audio:
                         yield f"data: {json.dumps({'type': 'audio', 'data': audio})}\n\n"
+                if req.chat_id and full_text:
+                    db.add_message(req.chat_id, "assistant", full_text)
                 yield f"data: {json.dumps({'type': 'done', 'full_text': full_text})}\n\n"
                 break
 

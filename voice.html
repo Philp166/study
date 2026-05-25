@@ -288,7 +288,6 @@
   </div>
 
   <script>
-    // ===== Check browser support =====
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const hasSpeech = !!SpeechRecognition;
     if (!hasSpeech) {
@@ -298,21 +297,61 @@
       document.getElementById("status").textContent = "Голосовой ввод недоступен — пиши текстом";
     }
 
-    // ===== Elements =====
-    const STORAGE_KEY = "cos_voice_history";
+    const API = "";
+    const VOICE_CHAT_TITLE = "__voice__";
+
     const transcriptEl = document.getElementById("transcript");
     const statusEl = document.getElementById("status");
     const micBtn = document.getElementById("mic-btn");
     const liveTextEl = document.getElementById("live-text");
     const hintEl = document.getElementById("hint");
 
-    // ===== State =====
+    let chatId = null;
     let messages = [];
     let recognition = null;
     let sessionActive = false;
     let busy = false;
     let currentAudio = null;
     let audioCtx = null;
+
+    async function apiCall(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      return res.json();
+    }
+
+    async function ensureVoiceChat() {
+      const chats = await apiCall("GET", "/api/chats");
+      const existing = chats.find(c => c.title === VOICE_CHAT_TITLE);
+      if (existing) {
+        chatId = existing.id;
+      } else {
+        const { id } = await apiCall("POST", "/api/chats", { title: VOICE_CHAT_TITLE, model: "claude-haiku-4-5" });
+        chatId = id;
+      }
+      const data = await apiCall("GET", `/api/chats/${chatId}`);
+      messages = data.messages || [];
+    }
+
+    async function migrateVoiceLocalStorage() {
+      const STORAGE_KEY = "cos_voice_history";
+      let raw = null;
+      try { raw = localStorage.getItem(STORAGE_KEY); } catch {}
+      if (!raw) return;
+      try {
+        const msgs = JSON.parse(raw);
+        if (!msgs || msgs.length === 0) return;
+        await ensureVoiceChat();
+        for (const m of msgs) {
+          await apiCall("POST", `/api/chats/${chatId}/messages`, { role: m.role, content: m.content });
+        }
+        localStorage.removeItem(STORAGE_KEY);
+        console.log(`Migrated ${msgs.length} voice message(s) to server.`);
+      } catch (e) {
+        console.error("Voice migration failed:", e);
+      }
+    }
 
     function unlockAudio() {
       if (!audioCtx) {
@@ -323,32 +362,22 @@
       }
     }
 
-    // ===== Markdown =====
     function renderMarkdown(text) {
       return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
     }
 
-    // ===== localStorage =====
-    function loadHistory() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) messages = JSON.parse(raw);
-      } catch {}
-    }
-
-    function saveHistory() {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages)); } catch {}
-    }
-
-    function clearHistory() {
+    async function clearHistory() {
       if (messages.length === 0) return;
       if (!confirm("Очистить историю голосового чата?")) return;
+      if (chatId) {
+        await apiCall("DELETE", `/api/chats/${chatId}`);
+        chatId = null;
+      }
       messages = [];
-      saveHistory();
+      await ensureVoiceChat();
       renderTranscript();
     }
 
-    // ===== UI =====
     function updateUI(state, text) {
       statusEl.classList.remove("error");
       micBtn.classList.remove("listening", "processing");
@@ -419,7 +448,6 @@
       for (const m of messages) addBubble(m.role, m.content);
     }
 
-    // ===== Speech Recognition (browser) =====
     function createRecognition() {
       const rec = new SpeechRecognition();
       rec.lang = "ru-RU";
@@ -446,7 +474,6 @@
 
         liveTextEl.textContent = finalTranscript + interim;
 
-        // Reset silence timer on any speech
         clearTimeout(silenceTimer);
         if (finalTranscript.trim()) {
           silenceTimer = setTimeout(() => {
@@ -460,7 +487,6 @@
       };
 
       rec.onend = () => {
-        // Auto-restart if session is active and not busy
         if (sessionActive && !busy) {
           try { rec.start(); } catch {}
         }
@@ -478,7 +504,6 @@
       return rec;
     }
 
-    // ===== Session =====
     function startSession() {
       if (!SpeechRecognition) return;
       recognition = createRecognition();
@@ -522,19 +547,16 @@
       processVoice(text);
     }
 
-    // ===== Voice pipeline: streaming text + sentence-level TTS =====
     async function processVoice(userText) {
       busy = true;
       updateUI("processing");
 
       addBubble("user", userText);
       messages.push({ role: "user", content: userText });
-      saveHistory();
 
       let botBubble = null;
       let fullText = "";
 
-      // Audio queue for seamless sentence-by-sentence playback
       const audioQueue = [];
       let playing = false;
       let streamEnded = false;
@@ -559,10 +581,7 @@
         const resp = await fetch("/voice/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: userText,
-            messages: messages.slice(0, -1),
-          }),
+          body: JSON.stringify({ text: userText, chat_id: chatId }),
         });
 
         const reader = resp.body.getReader();
@@ -599,7 +618,6 @@
 
               if (data.type === "done") {
                 messages.push({ role: "assistant", content: data.full_text || fullText });
-                saveHistory();
               }
 
               if (data.type === "error") {
@@ -669,9 +687,11 @@
       });
     }
 
-    // ===== Init =====
-    loadHistory();
-    renderTranscript();
+    (async () => {
+      await migrateVoiceLocalStorage();
+      await ensureVoiceChat();
+      renderTranscript();
+    })();
 
     const voiceInput = document.getElementById("voice-text-input");
     if (voiceInput) {
