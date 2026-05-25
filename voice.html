@@ -397,7 +397,7 @@
       }
 
       const source = audioContext.createMediaStreamSource(mediaStream);
-      processor = audioContext.createScriptProcessorNode(4096, 1, 1);
+      processor = audioContext.createScriptProcessor(4096, 1, 1);
 
       processor.onaudioprocess = (e) => {
         if (busy) return;
