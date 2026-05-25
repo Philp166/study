@@ -60,6 +60,7 @@ class SaluteSpeech:
                 "Content-Type": content_type,
             },
             data=audio_bytes,
+            verify=False,
         )
         resp.raise_for_status()
         result = resp.json()
@@ -84,6 +85,7 @@ class SaluteSpeech:
             },
             params={"voice": voice, "format": "wav16"},
             data=text.encode("utf-8"),
+            verify=False,
         )
         resp.raise_for_status()
         return resp.content

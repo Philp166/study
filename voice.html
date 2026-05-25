@@ -16,6 +16,7 @@
       --card: #ffffff;
       --border: #ececec;
       --danger: #dc2626;
+      --active: #22c55e;
     }
 
     body {
@@ -119,7 +120,6 @@
       border-bottom-left-radius: 6px;
     }
 
-    /* Markdown в ответах бота */
     .msg.bot > *:first-child { margin-top: 0; }
     .msg.bot > *:last-child  { margin-bottom: 0; }
     .msg.bot h1, .msg.bot h2, .msg.bot h3 { font-weight: 600; line-height: 1.3; margin: 12px 0 6px; }
@@ -132,18 +132,12 @@
     .msg.bot strong { font-weight: 600; }
     .msg.bot a { color: #2563eb; text-decoration: underline; }
     .msg.bot code {
-      background: #f1f1f1;
-      padding: 1px 6px;
-      border-radius: 5px;
-      font-family: ui-monospace, "SF Mono", Consolas, monospace;
-      font-size: 13px;
+      background: #f1f1f1; padding: 1px 6px; border-radius: 5px;
+      font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px;
     }
     .msg.bot pre {
-      background: #f4f4f4;
-      padding: 10px 12px;
-      border-radius: 8px;
-      overflow-x: auto;
-      margin: 8px 0;
+      background: #f4f4f4; padding: 10px 12px; border-radius: 8px;
+      overflow-x: auto; margin: 8px 0;
     }
     .msg.bot pre code { background: none; padding: 0; }
 
@@ -153,8 +147,8 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
-      padding: 16px 20px 32px;
+      gap: 10px;
+      padding: 16px 20px 28px;
       background: var(--card);
       border-top: 1px solid var(--border);
     }
@@ -166,6 +160,22 @@
       transition: color 0.2s;
     }
     #status.error { color: var(--danger); }
+
+    /* Volume bar */
+    .volume-wrap {
+      width: 160px;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .volume-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--active);
+      border-radius: 2px;
+      transition: width 0.08s linear;
+    }
 
     .mic-btn {
       width: 72px;
@@ -179,12 +189,19 @@
       align-items: center;
       justify-content: center;
       transition: background 0.2s, transform 0.1s, box-shadow 0.3s;
+      position: relative;
     }
     .mic-btn:hover:not(:disabled) { background: #333; }
     .mic-btn:active:not(:disabled) { transform: scale(0.94); }
     .mic-btn:disabled { background: #cfcfcf; cursor: default; }
 
-    .mic-btn.recording {
+    /* Session active — green with breathing glow */
+    .mic-btn.active {
+      background: var(--active);
+    }
+
+    /* Voice detected — red pulse */
+    .mic-btn.capturing {
       background: var(--danger);
       animation: pulse 1.5s infinite;
     }
@@ -195,18 +212,22 @@
       100%{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
     }
 
-    /* Спиннер при обработке */
+    /* Processing spinner */
     .mic-btn.processing svg { display: none; }
     .mic-btn.processing::after {
       content: "";
-      width: 24px;
-      height: 24px;
+      width: 24px; height: 24px;
       border: 3px solid rgba(255,255,255,0.3);
       border-top-color: #fff;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -224,37 +245,56 @@
   <div id="transcript"></div>
 
   <div class="controls">
-    <div id="status">Нажми на микрофон</div>
-    <button class="mic-btn" id="mic-btn" onclick="toggleRecording()">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <div id="status">Нажми, чтобы начать разговор</div>
+    <div class="volume-wrap"><div class="volume-bar" id="volume-bar"></div></div>
+    <button class="mic-btn" id="mic-btn" onclick="toggleSession()">
+      <svg id="mic-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="9" y="1" width="6" height="11" rx="3"/>
         <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
         <line x1="12" y1="19" x2="12" y2="23"/>
         <line x1="8" y1="23" x2="16" y2="23"/>
       </svg>
     </button>
+    <div class="hint" id="hint"></div>
   </div>
 
   <script>
+    // ===== Config =====
+    const SILENCE_THRESHOLD = 0.012;
+    const SILENCE_TIMEOUT_MS = 1500;
+    const MIN_CAPTURE_MS = 600;
+
+    // ===== Elements =====
     const STORAGE_KEY = "cos_voice_history";
     const transcriptEl = document.getElementById("transcript");
     const statusEl = document.getElementById("status");
     const micBtn = document.getElementById("mic-btn");
+    const volumeBar = document.getElementById("volume-bar");
+    const hintEl = document.getElementById("hint");
 
+    // ===== State =====
     let messages = [];
     let audioContext = null;
     let mediaStream = null;
     let processor = null;
     let audioChunks = [];
-    let isRecording = false;
     let currentAudio = null;
 
-    // --- Markdown ---
+    // Session = mic open, auto-listening loop
+    let sessionActive = false;
+    // Capture = voice detected, recording audio
+    let isCapturing = false;
+    let captureStartTime = 0;
+    let lastVoiceTime = 0;
+    // Lock while processing/speaking
+    let busy = false;
+
+    // ===== Markdown =====
     function renderMarkdown(text) {
       return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
     }
 
-    // --- localStorage ---
+    // ===== localStorage =====
     function loadHistory() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
@@ -274,32 +314,43 @@
       renderTranscript();
     }
 
-    // --- UI ---
-    function setStatus(state, text) {
+    // ===== UI =====
+    function updateUI(state, text) {
       statusEl.classList.remove("error");
-      micBtn.classList.remove("recording", "processing");
+      micBtn.classList.remove("active", "capturing", "processing");
       micBtn.disabled = false;
+      hintEl.textContent = "";
 
       switch (state) {
-        case "ready":
-          statusEl.textContent = "Нажми на микрофон";
+        case "idle":
+          statusEl.textContent = "Нажми, чтобы начать разговор";
+          volumeBar.style.width = "0%";
           break;
-        case "recording":
-          statusEl.textContent = "Слушаю... (нажми ещё раз, чтобы остановить)";
-          micBtn.classList.add("recording");
+        case "listening":
+          statusEl.textContent = "Слушаю... говори свободно";
+          micBtn.classList.add("active");
+          hintEl.textContent = "Нажми ещё раз, чтобы завершить";
+          break;
+        case "capturing":
+          statusEl.textContent = "Записываю...";
+          micBtn.classList.add("capturing");
+          hintEl.textContent = "Замолчи — отправлю автоматически";
           break;
         case "processing":
           statusEl.textContent = "Обрабатываю...";
           micBtn.classList.add("processing");
           micBtn.disabled = true;
+          volumeBar.style.width = "0%";
           break;
         case "speaking":
           statusEl.textContent = "Говорю...";
           micBtn.disabled = true;
+          volumeBar.style.width = "0%";
           break;
         case "error":
           statusEl.textContent = text || "Ошибка";
           statusEl.classList.add("error");
+          volumeBar.style.width = "0%";
           break;
       }
     }
@@ -307,7 +358,6 @@
     function addBubble(role, text) {
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
-
       const el = document.createElement("div");
       el.className = "msg " + (role === "user" ? "user" : "bot");
       if (role === "user") {
@@ -327,51 +377,105 @@
         const strong = document.createElement("strong");
         strong.textContent = "Голосовой чат с CoS";
         empty.appendChild(strong);
-        empty.appendChild(document.createTextNode("Нажми на микрофон и задай вопрос голосом."));
+        empty.appendChild(document.createTextNode("Нажми на микрофон и начни говорить свободно."));
         transcriptEl.appendChild(empty);
         return;
       }
       for (const m of messages) addBubble(m.role, m.content);
     }
 
-    // --- Recording (raw PCM 16kHz 16-bit mono) ---
-    async function startRecording() {
+    // ===== Session (mic open, auto-listen loop) =====
+    async function startSession() {
       try {
         audioContext = new AudioContext({ sampleRate: 16000 });
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
         });
       } catch (e) {
-        setStatus("error", "Нет доступа к микрофону");
+        updateUI("error", "Нет доступа к микрофону");
         return;
       }
 
       const source = audioContext.createMediaStreamSource(mediaStream);
       processor = audioContext.createScriptProcessorNode(4096, 1, 1);
-      audioChunks = [];
 
       processor.onaudioprocess = (e) => {
+        if (busy) return;
+
         const float32 = e.inputBuffer.getChannelData(0);
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          const s = Math.max(-1, Math.min(1, float32[i]));
-          int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+
+        // RMS volume
+        let sum = 0;
+        for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
+        const rms = Math.sqrt(sum / float32.length);
+        volumeBar.style.width = Math.min(100, rms * 800) + "%";
+
+        const now = Date.now();
+
+        if (rms > SILENCE_THRESHOLD) {
+          lastVoiceTime = now;
+
+          if (!isCapturing) {
+            // Voice detected — start capturing
+            isCapturing = true;
+            captureStartTime = now;
+            audioChunks = [];
+            updateUI("capturing");
+          }
         }
-        audioChunks.push(new Uint8Array(int16.buffer));
+
+        // Always collect audio while capturing
+        if (isCapturing) {
+          const int16 = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32[i]));
+            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          audioChunks.push(new Uint8Array(int16.buffer));
+        }
+
+        // Check for silence timeout
+        if (isCapturing && now - lastVoiceTime > SILENCE_TIMEOUT_MS) {
+          const duration = now - captureStartTime;
+          if (duration >= MIN_CAPTURE_MS) {
+            isCapturing = false;
+            const audioData = combineChunks();
+            processVoice(audioData);
+          } else {
+            // Too short, reset
+            isCapturing = false;
+            audioChunks = [];
+            updateUI("listening");
+          }
+        }
       };
 
       source.connect(processor);
       processor.connect(audioContext.destination);
-      isRecording = true;
-      setStatus("recording");
+
+      sessionActive = true;
+      updateUI("listening");
     }
 
-    function stopRecording() {
+    function stopSession() {
+      sessionActive = false;
+      isCapturing = false;
+      audioChunks = [];
       if (processor) processor.disconnect();
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-      if (audioContext) audioContext.close();
-      isRecording = false;
+      if (audioContext && audioContext.state !== "closed") audioContext.close();
+      updateUI("idle");
+    }
 
+    function toggleSession() {
+      if (sessionActive) {
+        stopSession();
+      } else {
+        startSession();
+      }
+    }
+
+    function combineChunks() {
       const totalLength = audioChunks.reduce((sum, c) => sum + c.byteLength, 0);
       const combined = new Uint8Array(totalLength);
       let offset = 0;
@@ -383,23 +487,10 @@
       return combined;
     }
 
-    async function toggleRecording() {
-      if (isRecording) {
-        const audioData = stopRecording();
-        // Минимум ~0.5 сек записи (16000 samples/sec * 2 bytes * 0.5 = 16000 bytes)
-        if (audioData.byteLength < 16000) {
-          setStatus("error", "Слишком короткая запись. Попробуй ещё раз.");
-          return;
-        }
-        await processVoice(audioData);
-      } else {
-        await startRecording();
-      }
-    }
-
-    // --- Voice pipeline: STT -> Agent -> TTS ---
+    // ===== Voice pipeline: STT -> Agent -> TTS =====
     async function processVoice(audioData) {
-      setStatus("processing");
+      busy = true;
+      updateUI("processing");
 
       const formData = new FormData();
       formData.append("audio", new Blob([audioData]), "audio.pcm");
@@ -410,7 +501,10 @@
         const data = await resp.json();
 
         if (data.error) {
-          setStatus("error", data.error);
+          updateUI("error", data.error);
+          busy = false;
+          // Auto-recover to listening after 3 sec
+          setTimeout(() => { if (sessionActive) updateUI("listening"); }, 3000);
           return;
         }
 
@@ -421,14 +515,16 @@
         addBubble("assistant", data.reply_text);
 
         if (data.reply_audio) {
-          setStatus("speaking");
+          updateUI("speaking");
           await playAudio(data.reply_audio);
         }
-
-        setStatus("ready");
       } catch (e) {
-        setStatus("error", "Ошибка связи с сервером: " + e.message);
+        updateUI("error", "Ошибка связи с сервером: " + e.message);
+        setTimeout(() => { if (sessionActive) updateUI("listening"); }, 3000);
       }
+
+      busy = false;
+      if (sessionActive) updateUI("listening");
     }
 
     function playAudio(base64Audio) {
@@ -443,7 +539,7 @@
       });
     }
 
-    // --- Init ---
+    // ===== Init =====
     loadHistory();
     renderTranscript();
   </script>
