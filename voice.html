@@ -216,6 +216,41 @@
       color: var(--danger);
       font-size: 15px;
     }
+
+    .text-input-row {
+      display: none;
+      gap: 8px;
+      width: 100%;
+      max-width: 500px;
+    }
+    #voice-text-input {
+      flex: 1;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      font: inherit;
+      font-size: 15px;
+      outline: none;
+      background: var(--bg);
+      transition: border-color 0.15s;
+    }
+    #voice-text-input:focus { border-color: var(--ink); }
+    .send-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: 0;
+      background: var(--ink);
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .send-btn:hover { background: #333; }
+    .send-btn:disabled { background: #cfcfcf; cursor: default; }
   </style>
 </head>
 <body>
@@ -244,14 +279,23 @@
       </svg>
     </button>
     <div class="hint" id="hint"></div>
+    <div class="text-input-row" id="text-input-row">
+      <input type="text" id="voice-text-input" placeholder="Напиши сообщение..." autocomplete="off" />
+      <button class="send-btn" id="voice-send-btn" onclick="sendTextMessage()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
   </div>
 
   <script>
     // ===== Check browser support =====
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      document.getElementById("controls").innerHTML =
-        '<div class="unsupported">Браузер не поддерживает распознавание речи.<br>Используй Google Chrome.</div>';
+    const hasSpeech = !!SpeechRecognition;
+    if (!hasSpeech) {
+      document.getElementById("mic-btn").style.display = "none";
+      document.getElementById("hint").style.display = "none";
+      document.getElementById("text-input-row").style.display = "flex";
+      document.getElementById("status").textContent = "Голосовой ввод недоступен — пиши текстом";
     }
 
     // ===== Elements =====
@@ -268,6 +312,16 @@
     let sessionActive = false;
     let busy = false;
     let currentAudio = null;
+    let audioCtx = null;
+
+    function unlockAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
 
     // ===== Markdown =====
     function renderMarkdown(text) {
@@ -301,10 +355,14 @@
       micBtn.disabled = false;
       hintEl.textContent = "";
       liveTextEl.textContent = "";
+      const sendBtn = document.getElementById("voice-send-btn");
+      const textInput = document.getElementById("voice-text-input");
+      if (sendBtn) sendBtn.disabled = false;
+      if (textInput) textInput.disabled = false;
 
       switch (state) {
         case "idle":
-          statusEl.textContent = "Нажми, чтобы начать разговор";
+          statusEl.textContent = hasSpeech ? "Нажми, чтобы начать разговор" : "";
           break;
         case "listening":
           statusEl.textContent = "Слушаю... говори свободно";
@@ -315,10 +373,14 @@
           statusEl.textContent = "Думаю...";
           micBtn.classList.add("processing");
           micBtn.disabled = true;
+          if (sendBtn) sendBtn.disabled = true;
+          if (textInput) textInput.disabled = true;
           break;
         case "speaking":
           statusEl.textContent = "Говорю...";
           micBtn.disabled = true;
+          if (sendBtn) sendBtn.disabled = true;
+          if (textInput) textInput.disabled = true;
           break;
         case "error":
           statusEl.textContent = text || "Ошибка";
@@ -339,6 +401,7 @@
       }
       transcriptEl.appendChild(el);
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return el;
     }
 
     function renderTranscript() {
@@ -442,6 +505,7 @@
     }
 
     function toggleSession() {
+      unlockAudio();
       if (sessionActive) {
         stopSession();
       } else {
@@ -449,7 +513,16 @@
       }
     }
 
-    // ===== Voice pipeline: text -> Agent -> TTS =====
+    function sendTextMessage() {
+      const input = document.getElementById("voice-text-input");
+      const text = input.value.trim();
+      if (!text || busy) return;
+      input.value = "";
+      unlockAudio();
+      processVoice(text);
+    }
+
+    // ===== Voice pipeline: streaming text + sentence-level TTS =====
     async function processVoice(userText) {
       busy = true;
       updateUI("processing");
@@ -458,8 +531,32 @@
       messages.push({ role: "user", content: userText });
       saveHistory();
 
+      let botBubble = null;
+      let fullText = "";
+
+      // Audio queue for seamless sentence-by-sentence playback
+      const audioQueue = [];
+      let playing = false;
+      let streamEnded = false;
+      let playbackDone = null;
+      const playbackPromise = new Promise(r => { playbackDone = r; });
+
+      async function drainAudio() {
+        if (playing) return;
+        playing = true;
+        updateUI("speaking");
+        while (audioQueue.length > 0) {
+          const b64 = audioQueue.shift();
+          await playAudio(b64);
+        }
+        playing = false;
+        if (streamEnded && audioQueue.length === 0) {
+          playbackDone();
+        }
+      }
+
       try {
-        const resp = await fetch("/voice/chat", {
+        const resp = await fetch("/voice/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -467,30 +564,78 @@
             messages: messages.slice(0, -1),
           }),
         });
-        const data = await resp.json();
 
-        if (data.error) {
-          updateUI("error", data.error);
-          busy = false;
-          setTimeout(() => { if (sessionActive) resumeListening(); }, 3000);
-          return;
-        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-        messages.push({ role: "assistant", content: data.reply_text });
-        saveHistory();
-        addBubble("assistant", data.reply_text);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        if (data.reply_audio) {
-          updateUI("speaking");
-          await playAudio(data.reply_audio);
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            if (!part.startsWith("data: ")) continue;
+            try {
+              const data = JSON.parse(part.slice(6));
+
+              if (data.type === "text") {
+                fullText += data.chunk;
+                if (!botBubble) {
+                  botBubble = addBubble("assistant", fullText);
+                } else {
+                  botBubble.innerHTML = renderMarkdown(fullText);
+                }
+                transcriptEl.scrollTop = transcriptEl.scrollHeight;
+              }
+
+              if (data.type === "audio" && data.data) {
+                audioQueue.push(data.data);
+                drainAudio();
+              }
+
+              if (data.type === "done") {
+                messages.push({ role: "assistant", content: data.full_text || fullText });
+                saveHistory();
+              }
+
+              if (data.type === "error") {
+                updateUI("error", data.message);
+                busy = false;
+                setTimeout(() => {
+                  if (sessionActive) resumeListening();
+                  else updateUI("idle");
+                }, 3000);
+                return;
+              }
+            } catch {}
+          }
         }
       } catch (e) {
         updateUI("error", "Ошибка связи с сервером");
-        setTimeout(() => { if (sessionActive) resumeListening(); }, 3000);
+        busy = false;
+        setTimeout(() => {
+          if (sessionActive) resumeListening();
+          else updateUI("idle");
+        }, 3000);
+        return;
       }
 
+      streamEnded = true;
+      if (!playing && audioQueue.length === 0) {
+        playbackDone();
+      }
+      await playbackPromise;
+
       busy = false;
-      if (sessionActive) resumeListening();
+      if (sessionActive) {
+        resumeListening();
+      } else {
+        updateUI("idle");
+      }
     }
 
     function resumeListening() {
@@ -503,20 +648,40 @@
     }
 
     function playAudio(base64Audio) {
-      return new Promise((resolve) => {
-        const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
-        const blob = new Blob([bytes], { type: "audio/mp3" });
-        const url = URL.createObjectURL(blob);
-        currentAudio = new Audio(url);
-        currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
-        currentAudio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
-        currentAudio.play().catch(() => resolve());
+      return new Promise(async (resolve) => {
+        try {
+          if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+          const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+          const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+          const source = audioCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioCtx.destination);
+          source.onended = resolve;
+          source.start();
+        } catch (e) {
+          console.warn("Audio playback error:", e);
+          resolve();
+        }
       });
     }
 
     // ===== Init =====
     loadHistory();
     renderTranscript();
+
+    const voiceInput = document.getElementById("voice-text-input");
+    if (voiceInput) {
+      voiceInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendTextMessage();
+        }
+      });
+    }
   </script>
 </body>
 </html>
