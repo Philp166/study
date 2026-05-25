@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CoS — Голосовой чат</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #fafafa;
+      --ink: #0a0a0a;
+      --muted: #8a8a8a;
+      --card: #ffffff;
+      --border: #ececec;
+      --danger: #dc2626;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ===== Header ===== */
+    .header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card);
+    }
+
+    .back-link {
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: opacity 0.15s;
+    }
+    .back-link:hover { opacity: 0.6; }
+
+    .header-title {
+      font-size: 16px;
+      font-weight: 600;
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .clear-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .clear-btn:hover { background: rgba(0,0,0,0.05); color: var(--ink); }
+
+    /* ===== Transcript ===== */
+    #transcript {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-width: 700px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    #empty {
+      margin: auto;
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    #empty strong { display: block; font-size: 18px; color: var(--ink); margin-bottom: 6px; }
+
+    .msg {
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 20px;
+      font-size: 15px;
+      line-height: 1.55;
+      word-wrap: break-word;
+      animation: rise 0.25s ease;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--ink);
+      color: #fff;
+      border-bottom-right-radius: 6px;
+      white-space: pre-wrap;
+    }
+    .msg.bot {
+      align-self: flex-start;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
+
+    /* Markdown в ответах бота */
+    .msg.bot > *:first-child { margin-top: 0; }
+    .msg.bot > *:last-child  { margin-bottom: 0; }
+    .msg.bot h1, .msg.bot h2, .msg.bot h3 { font-weight: 600; line-height: 1.3; margin: 12px 0 6px; }
+    .msg.bot h1 { font-size: 19px; }
+    .msg.bot h2 { font-size: 17px; }
+    .msg.bot h3 { font-size: 16px; }
+    .msg.bot p { margin: 6px 0; }
+    .msg.bot ul, .msg.bot ol { padding-left: 22px; margin: 6px 0; }
+    .msg.bot li { margin: 2px 0; }
+    .msg.bot strong { font-weight: 600; }
+    .msg.bot a { color: #2563eb; text-decoration: underline; }
+    .msg.bot code {
+      background: #f1f1f1;
+      padding: 1px 6px;
+      border-radius: 5px;
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 13px;
+    }
+    .msg.bot pre {
+      background: #f4f4f4;
+      padding: 10px 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .msg.bot pre code { background: none; padding: 0; }
+
+    /* ===== Controls ===== */
+    .controls {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 20px 32px;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+    }
+
+    #status {
+      font-size: 14px;
+      color: var(--muted);
+      min-height: 20px;
+      transition: color 0.2s;
+    }
+    #status.error { color: var(--danger); }
+
+    .mic-btn {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      border: 0;
+      background: var(--ink);
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s, transform 0.1s, box-shadow 0.3s;
+    }
+    .mic-btn:hover:not(:disabled) { background: #333; }
+    .mic-btn:active:not(:disabled) { transform: scale(0.94); }
+    .mic-btn:disabled { background: #cfcfcf; cursor: default; }
+
+    .mic-btn.recording {
+      background: var(--danger);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%  { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.5); }
+      70% { box-shadow: 0 0 0 20px rgba(220, 38, 38, 0); }
+      100%{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+    }
+
+    /* Спиннер при обработке */
+    .mic-btn.processing svg { display: none; }
+    .mic-btn.processing::after {
+      content: "";
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="header" style="position: relative;">
+    <a href="/" class="back-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+      </svg>
+      Текстовый чат
+    </a>
+    <span class="header-title">CoS — Голос</span>
+    <button class="clear-btn" onclick="clearHistory()">Очистить</button>
+  </div>
+
+  <div id="transcript"></div>
+
+  <div class="controls">
+    <div id="status">Нажми на микрофон</div>
+    <button class="mic-btn" id="mic-btn" onclick="toggleRecording()">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="1" width="6" height="11" rx="3"/>
+        <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
+        <line x1="12" y1="19" x2="12" y2="23"/>
+        <line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </button>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "cos_voice_history";
+    const transcriptEl = document.getElementById("transcript");
+    const statusEl = document.getElementById("status");
+    const micBtn = document.getElementById("mic-btn");
+
+    let messages = [];
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let audioChunks = [];
+    let isRecording = false;
+    let currentAudio = null;
+
+    // --- Markdown ---
+    function renderMarkdown(text) {
+      return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
+    }
+
+    // --- localStorage ---
+    function loadHistory() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) messages = JSON.parse(raw);
+      } catch {}
+    }
+
+    function saveHistory() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages)); } catch {}
+    }
+
+    function clearHistory() {
+      if (messages.length === 0) return;
+      if (!confirm("Очистить историю голосового чата?")) return;
+      messages = [];
+      saveHistory();
+      renderTranscript();
+    }
+
+    // --- UI ---
+    function setStatus(state, text) {
+      statusEl.classList.remove("error");
+      micBtn.classList.remove("recording", "processing");
+      micBtn.disabled = false;
+
+      switch (state) {
+        case "ready":
+          statusEl.textContent = "Нажми на микрофон";
+          break;
+        case "recording":
+          statusEl.textContent = "Слушаю... (нажми ещё раз, чтобы остановить)";
+          micBtn.classList.add("recording");
+          break;
+        case "processing":
+          statusEl.textContent = "Обрабатываю...";
+          micBtn.classList.add("processing");
+          micBtn.disabled = true;
+          break;
+        case "speaking":
+          statusEl.textContent = "Говорю...";
+          micBtn.disabled = true;
+          break;
+        case "error":
+          statusEl.textContent = text || "Ошибка";
+          statusEl.classList.add("error");
+          break;
+      }
+    }
+
+    function addBubble(role, text) {
+      const empty = transcriptEl.querySelector("#empty");
+      if (empty) empty.remove();
+
+      const el = document.createElement("div");
+      el.className = "msg " + (role === "user" ? "user" : "bot");
+      if (role === "user") {
+        el.textContent = text;
+      } else {
+        el.innerHTML = renderMarkdown(text);
+      }
+      transcriptEl.appendChild(el);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    function renderTranscript() {
+      transcriptEl.innerHTML = "";
+      if (messages.length === 0) {
+        const empty = document.createElement("div");
+        empty.id = "empty";
+        const strong = document.createElement("strong");
+        strong.textContent = "Голосовой чат с CoS";
+        empty.appendChild(strong);
+        empty.appendChild(document.createTextNode("Нажми на микрофон и задай вопрос голосом."));
+        transcriptEl.appendChild(empty);
+        return;
+      }
+      for (const m of messages) addBubble(m.role, m.content);
+    }
+
+    // --- Recording (raw PCM 16kHz 16-bit mono) ---
+    async function startRecording() {
+      try {
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+        });
+      } catch (e) {
+        setStatus("error", "Нет доступа к микрофону");
+        return;
+      }
+
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      processor = audioContext.createScriptProcessorNode(4096, 1, 1);
+      audioChunks = [];
+
+      processor.onaudioprocess = (e) => {
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          const s = Math.max(-1, Math.min(1, float32[i]));
+          int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+        audioChunks.push(new Uint8Array(int16.buffer));
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      isRecording = true;
+      setStatus("recording");
+    }
+
+    function stopRecording() {
+      if (processor) processor.disconnect();
+      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      if (audioContext) audioContext.close();
+      isRecording = false;
+
+      const totalLength = audioChunks.reduce((sum, c) => sum + c.byteLength, 0);
+      const combined = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of audioChunks) {
+        combined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      audioChunks = [];
+      return combined;
+    }
+
+    async function toggleRecording() {
+      if (isRecording) {
+        const audioData = stopRecording();
+        // Минимум ~0.5 сек записи (16000 samples/sec * 2 bytes * 0.5 = 16000 bytes)
+        if (audioData.byteLength < 16000) {
+          setStatus("error", "Слишком короткая запись. Попробуй ещё раз.");
+          return;
+        }
+        await processVoice(audioData);
+      } else {
+        await startRecording();
+      }
+    }
+
+    // --- Voice pipeline: STT -> Agent -> TTS ---
+    async function processVoice(audioData) {
+      setStatus("processing");
+
+      const formData = new FormData();
+      formData.append("audio", new Blob([audioData]), "audio.pcm");
+      formData.append("messages", JSON.stringify(messages));
+
+      try {
+        const resp = await fetch("/voice/chat", { method: "POST", body: formData });
+        const data = await resp.json();
+
+        if (data.error) {
+          setStatus("error", data.error);
+          return;
+        }
+
+        messages.push({ role: "user", content: data.user_text });
+        messages.push({ role: "assistant", content: data.reply_text });
+        saveHistory();
+        addBubble("user", data.user_text);
+        addBubble("assistant", data.reply_text);
+
+        if (data.reply_audio) {
+          setStatus("speaking");
+          await playAudio(data.reply_audio);
+        }
+
+        setStatus("ready");
+      } catch (e) {
+        setStatus("error", "Ошибка связи с сервером: " + e.message);
+      }
+    }
+
+    function playAudio(base64Audio) {
+      return new Promise((resolve) => {
+        const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: "audio/wav" });
+        const url = URL.createObjectURL(blob);
+        currentAudio = new Audio(url);
+        currentAudio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+        currentAudio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+        currentAudio.play().catch(() => resolve());
+      });
+    }
+
+    // --- Init ---
+    loadHistory();
+    renderTranscript();
+  </script>
+</body>
+</html>

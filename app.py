@@ -1,8 +1,10 @@
+import base64
+import json
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -10,6 +12,7 @@ from pydantic import BaseModel
 import anthropic
 
 from agent import Agent
+from salute_speech import SaluteSpeech
 
 # Папка, где лежит этот файл. Привязываемся к ней, а не к папке запуска,
 # чтобы .env и index.html находились независимо от того, откуда стартуем сервер.
@@ -24,6 +27,7 @@ if not os.getenv("ANTHROPIC_API_KEY"):
 
 client = anthropic.Anthropic()
 cos_agent = Agent(client)
+speech = SaluteSpeech()
 
 app = FastAPI()
 
@@ -90,3 +94,52 @@ def chat(req: ChatRequest):
         return {"reply": text}
     except anthropic.APIError as e:
         return {"reply": f"Ошибка обращения к Claude: {e}"}
+
+
+@app.get("/voice")
+def voice_page():
+    return FileResponse(BASE_DIR / "voice.html")
+
+
+@app.post("/voice/chat")
+async def voice_chat(
+    audio: UploadFile,
+    messages: str = Form("[]"),
+    model: str = Form(None),
+):
+    if not speech.is_configured:
+        return {"error": "SaluteSpeech не настроен. Добавь SALUTE_SPEECH_AUTH в .env"}
+
+    model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
+    cos_agent.model = model
+
+    audio_bytes = await audio.read()
+
+    try:
+        user_text = speech.recognize(audio_bytes)
+    except Exception as e:
+        return {"error": f"Ошибка распознавания речи: {e}"}
+
+    if not user_text:
+        return {"error": "Не удалось распознать речь. Попробуй ещё раз."}
+
+    history = json.loads(messages)
+    history.append({"role": "user", "content": user_text})
+
+    try:
+        reply_text = cos_agent.respond(history)
+    except Exception as e:
+        return {"error": f"Ошибка агента: {e}"}
+
+    reply_audio_b64 = ""
+    try:
+        reply_audio = speech.synthesize(reply_text)
+        reply_audio_b64 = base64.b64encode(reply_audio).decode()
+    except Exception:
+        pass
+
+    return {
+        "user_text": user_text,
+        "reply_text": reply_text,
+        "reply_audio": reply_audio_b64,
+    }
