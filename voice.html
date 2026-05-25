@@ -29,7 +29,6 @@
       flex-direction: column;
     }
 
-    /* ===== Header ===== */
     .header {
       flex-shrink: 0;
       display: flex;
@@ -38,6 +37,7 @@
       padding: 12px 20px;
       border-bottom: 1px solid var(--border);
       background: var(--card);
+      position: relative;
     }
 
     .back-link {
@@ -73,7 +73,6 @@
     }
     .clear-btn:hover { background: rgba(0,0,0,0.05); color: var(--ink); }
 
-    /* ===== Transcript ===== */
     #transcript {
       flex: 1;
       overflow-y: auto;
@@ -141,7 +140,6 @@
     }
     .msg.bot pre code { background: none; padding: 0; }
 
-    /* ===== Controls ===== */
     .controls {
       flex-shrink: 0;
       display: flex;
@@ -161,20 +159,15 @@
     }
     #status.error { color: var(--danger); }
 
-    /* Volume bar */
-    .volume-wrap {
-      width: 160px;
-      height: 4px;
-      background: var(--border);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .volume-bar {
-      height: 100%;
-      width: 0%;
-      background: var(--active);
-      border-radius: 2px;
-      transition: width 0.08s linear;
+    /* Live transcript of what user is saying */
+    #live-text {
+      font-size: 13px;
+      color: var(--ink);
+      min-height: 18px;
+      max-width: 400px;
+      text-align: center;
+      opacity: 0.6;
+      font-style: italic;
     }
 
     .mic-btn {
@@ -189,30 +182,21 @@
       align-items: center;
       justify-content: center;
       transition: background 0.2s, transform 0.1s, box-shadow 0.3s;
-      position: relative;
     }
     .mic-btn:hover:not(:disabled) { background: #333; }
     .mic-btn:active:not(:disabled) { transform: scale(0.94); }
     .mic-btn:disabled { background: #cfcfcf; cursor: default; }
 
-    /* Session active — green with breathing glow */
-    .mic-btn.active {
+    .mic-btn.listening {
       background: var(--active);
+      animation: glow 2s infinite;
     }
 
-    /* Voice detected — red pulse */
-    .mic-btn.capturing {
-      background: var(--danger);
-      animation: pulse 1.5s infinite;
+    @keyframes glow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+      50%      { box-shadow: 0 0 0 14px rgba(34, 197, 94, 0); }
     }
 
-    @keyframes pulse {
-      0%  { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.5); }
-      70% { box-shadow: 0 0 0 20px rgba(220, 38, 38, 0); }
-      100%{ box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
-    }
-
-    /* Processing spinner */
     .mic-btn.processing svg { display: none; }
     .mic-btn.processing::after {
       content: "";
@@ -224,14 +208,18 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .hint {
-      font-size: 12px;
-      color: var(--muted);
+    .hint { font-size: 12px; color: var(--muted); }
+
+    .unsupported {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--danger);
+      font-size: 15px;
     }
   </style>
 </head>
 <body>
-  <div class="header" style="position: relative;">
+  <div class="header">
     <a href="/" class="back-link">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
@@ -244,11 +232,11 @@
 
   <div id="transcript"></div>
 
-  <div class="controls">
+  <div class="controls" id="controls">
     <div id="status">Нажми, чтобы начать разговор</div>
-    <div class="volume-wrap"><div class="volume-bar" id="volume-bar"></div></div>
+    <div id="live-text"></div>
     <button class="mic-btn" id="mic-btn" onclick="toggleSession()">
-      <svg id="mic-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="9" y="1" width="6" height="11" rx="3"/>
         <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
         <line x1="12" y1="19" x2="12" y2="23"/>
@@ -259,35 +247,27 @@
   </div>
 
   <script>
-    // ===== Config =====
-    const SILENCE_THRESHOLD = 0.012;
-    const SILENCE_TIMEOUT_MS = 1500;
-    const MIN_CAPTURE_MS = 600;
+    // ===== Check browser support =====
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      document.getElementById("controls").innerHTML =
+        '<div class="unsupported">Браузер не поддерживает распознавание речи.<br>Используй Google Chrome.</div>';
+    }
 
     // ===== Elements =====
     const STORAGE_KEY = "cos_voice_history";
     const transcriptEl = document.getElementById("transcript");
     const statusEl = document.getElementById("status");
     const micBtn = document.getElementById("mic-btn");
-    const volumeBar = document.getElementById("volume-bar");
+    const liveTextEl = document.getElementById("live-text");
     const hintEl = document.getElementById("hint");
 
     // ===== State =====
     let messages = [];
-    let audioContext = null;
-    let mediaStream = null;
-    let processor = null;
-    let audioChunks = [];
-    let currentAudio = null;
-
-    // Session = mic open, auto-listening loop
+    let recognition = null;
     let sessionActive = false;
-    // Capture = voice detected, recording audio
-    let isCapturing = false;
-    let captureStartTime = 0;
-    let lastVoiceTime = 0;
-    // Lock while processing/speaking
     let busy = false;
+    let currentAudio = null;
 
     // ===== Markdown =====
     function renderMarkdown(text) {
@@ -317,40 +297,32 @@
     // ===== UI =====
     function updateUI(state, text) {
       statusEl.classList.remove("error");
-      micBtn.classList.remove("active", "capturing", "processing");
+      micBtn.classList.remove("listening", "processing");
       micBtn.disabled = false;
       hintEl.textContent = "";
+      liveTextEl.textContent = "";
 
       switch (state) {
         case "idle":
           statusEl.textContent = "Нажми, чтобы начать разговор";
-          volumeBar.style.width = "0%";
           break;
         case "listening":
           statusEl.textContent = "Слушаю... говори свободно";
-          micBtn.classList.add("active");
+          micBtn.classList.add("listening");
           hintEl.textContent = "Нажми ещё раз, чтобы завершить";
           break;
-        case "capturing":
-          statusEl.textContent = "Записываю...";
-          micBtn.classList.add("capturing");
-          hintEl.textContent = "Замолчи — отправлю автоматически";
-          break;
         case "processing":
-          statusEl.textContent = "Обрабатываю...";
+          statusEl.textContent = "Думаю...";
           micBtn.classList.add("processing");
           micBtn.disabled = true;
-          volumeBar.style.width = "0%";
           break;
         case "speaking":
           statusEl.textContent = "Говорю...";
           micBtn.disabled = true;
-          volumeBar.style.width = "0%";
           break;
         case "error":
           statusEl.textContent = text || "Ошибка";
           statusEl.classList.add("error");
-          volumeBar.style.width = "0%";
           break;
       }
     }
@@ -384,86 +356,88 @@
       for (const m of messages) addBubble(m.role, m.content);
     }
 
-    // ===== Session (mic open, auto-listen loop) =====
-    async function startSession() {
-      try {
-        audioContext = new AudioContext({ sampleRate: 16000 });
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
-        });
-      } catch (e) {
-        updateUI("error", "Нет доступа к микрофону");
-        return;
-      }
+    // ===== Speech Recognition (browser) =====
+    function createRecognition() {
+      const rec = new SpeechRecognition();
+      rec.lang = "ru-RU";
+      rec.continuous = true;
+      rec.interimResults = true;
 
-      const source = audioContext.createMediaStreamSource(mediaStream);
-      processor = audioContext.createScriptProcessor(4096, 1, 1);
+      let finalTranscript = "";
+      let silenceTimer = null;
 
-      processor.onaudioprocess = (e) => {
+      rec.onresult = (e) => {
         if (busy) return;
 
-        const float32 = e.inputBuffer.getChannelData(0);
+        let interim = "";
+        finalTranscript = "";
 
-        // RMS volume
-        let sum = 0;
-        for (let i = 0; i < float32.length; i++) sum += float32[i] * float32[i];
-        const rms = Math.sqrt(sum / float32.length);
-        volumeBar.style.width = Math.min(100, rms * 800) + "%";
-
-        const now = Date.now();
-
-        if (rms > SILENCE_THRESHOLD) {
-          lastVoiceTime = now;
-
-          if (!isCapturing) {
-            // Voice detected — start capturing
-            isCapturing = true;
-            captureStartTime = now;
-            audioChunks = [];
-            updateUI("capturing");
-          }
-        }
-
-        // Always collect audio while capturing
-        if (isCapturing) {
-          const int16 = new Int16Array(float32.length);
-          for (let i = 0; i < float32.length; i++) {
-            const s = Math.max(-1, Math.min(1, float32[i]));
-            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-          }
-          audioChunks.push(new Uint8Array(int16.buffer));
-        }
-
-        // Check for silence timeout
-        if (isCapturing && now - lastVoiceTime > SILENCE_TIMEOUT_MS) {
-          const duration = now - captureStartTime;
-          if (duration >= MIN_CAPTURE_MS) {
-            isCapturing = false;
-            const audioData = combineChunks();
-            processVoice(audioData);
+        for (let i = 0; i < e.results.length; i++) {
+          const result = e.results[i];
+          if (result.isFinal) {
+            finalTranscript += result[0].transcript;
           } else {
-            // Too short, reset
-            isCapturing = false;
-            audioChunks = [];
-            updateUI("listening");
+            interim += result[0].transcript;
           }
+        }
+
+        liveTextEl.textContent = finalTranscript + interim;
+
+        // Reset silence timer on any speech
+        clearTimeout(silenceTimer);
+        if (finalTranscript.trim()) {
+          silenceTimer = setTimeout(() => {
+            if (finalTranscript.trim() && !busy) {
+              const text = finalTranscript.trim();
+              rec.stop();
+              processVoice(text);
+            }
+          }, 1500);
         }
       };
 
-      source.connect(processor);
-      processor.connect(audioContext.destination);
+      rec.onend = () => {
+        // Auto-restart if session is active and not busy
+        if (sessionActive && !busy) {
+          try { rec.start(); } catch {}
+        }
+      };
 
-      sessionActive = true;
-      updateUI("listening");
+      rec.onerror = (e) => {
+        if (e.error === "not-allowed") {
+          updateUI("error", "Нет доступа к микрофону. Разреши в настройках браузера.");
+          sessionActive = false;
+        } else if (e.error !== "no-speech" && e.error !== "aborted") {
+          console.warn("Speech recognition error:", e.error);
+        }
+      };
+
+      return rec;
+    }
+
+    // ===== Session =====
+    function startSession() {
+      if (!SpeechRecognition) return;
+      recognition = createRecognition();
+      try {
+        recognition.start();
+        sessionActive = true;
+        updateUI("listening");
+      } catch (e) {
+        updateUI("error", "Не удалось запустить распознавание");
+      }
     }
 
     function stopSession() {
       sessionActive = false;
-      isCapturing = false;
-      audioChunks = [];
-      if (processor) processor.disconnect();
-      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-      if (audioContext && audioContext.state !== "closed") audioContext.close();
+      if (recognition) {
+        recognition.abort();
+        recognition = null;
+      }
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+      }
       updateUI("idle");
     }
 
@@ -475,43 +449,35 @@
       }
     }
 
-    function combineChunks() {
-      const totalLength = audioChunks.reduce((sum, c) => sum + c.byteLength, 0);
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of audioChunks) {
-        combined.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      audioChunks = [];
-      return combined;
-    }
-
-    // ===== Voice pipeline: STT -> Agent -> TTS =====
-    async function processVoice(audioData) {
+    // ===== Voice pipeline: text -> Agent -> TTS =====
+    async function processVoice(userText) {
       busy = true;
       updateUI("processing");
 
-      const formData = new FormData();
-      formData.append("audio", new Blob([audioData]), "audio.pcm");
-      formData.append("messages", JSON.stringify(messages));
+      addBubble("user", userText);
+      messages.push({ role: "user", content: userText });
+      saveHistory();
 
       try {
-        const resp = await fetch("/voice/chat", { method: "POST", body: formData });
+        const resp = await fetch("/voice/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: userText,
+            messages: messages.slice(0, -1),
+          }),
+        });
         const data = await resp.json();
 
         if (data.error) {
           updateUI("error", data.error);
           busy = false;
-          // Auto-recover to listening after 3 sec
-          setTimeout(() => { if (sessionActive) updateUI("listening"); }, 3000);
+          setTimeout(() => { if (sessionActive) resumeListening(); }, 3000);
           return;
         }
 
-        messages.push({ role: "user", content: data.user_text });
         messages.push({ role: "assistant", content: data.reply_text });
         saveHistory();
-        addBubble("user", data.user_text);
         addBubble("assistant", data.reply_text);
 
         if (data.reply_audio) {
@@ -519,22 +485,31 @@
           await playAudio(data.reply_audio);
         }
       } catch (e) {
-        updateUI("error", "Ошибка связи с сервером: " + e.message);
-        setTimeout(() => { if (sessionActive) updateUI("listening"); }, 3000);
+        updateUI("error", "Ошибка связи с сервером");
+        setTimeout(() => { if (sessionActive) resumeListening(); }, 3000);
       }
 
       busy = false;
-      if (sessionActive) updateUI("listening");
+      if (sessionActive) resumeListening();
+    }
+
+    function resumeListening() {
+      if (!sessionActive) return;
+      recognition = createRecognition();
+      try {
+        recognition.start();
+        updateUI("listening");
+      } catch {}
     }
 
     function playAudio(base64Audio) {
       return new Promise((resolve) => {
         const bytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
-        const blob = new Blob([bytes], { type: "audio/wav" });
+        const blob = new Blob([bytes], { type: "audio/mp3" });
         const url = URL.createObjectURL(blob);
         currentAudio = new Audio(url);
-        currentAudio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-        currentAudio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+        currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
+        currentAudio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; resolve(); };
         currentAudio.play().catch(() => resolve());
       });
     }

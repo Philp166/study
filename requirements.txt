@@ -2,5 +2,4 @@ anthropic
 python-dotenv
 fastapi
 uvicorn[standard]
-requests
-python-multipart
+edge-tts
