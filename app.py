@@ -1,12 +1,15 @@
 import os
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+import anthropic
+
+from agent import Agent
 
 # Папка, где лежит этот файл. Привязываемся к ней, а не к папке запуска,
 # чтобы .env и index.html находились независимо от того, откуда стартуем сервер.
@@ -20,8 +23,8 @@ if not os.getenv("ANTHROPIC_API_KEY"):
     raise SystemExit("Открой файл .env и вставь свой ключ в строку ANTHROPIC_API_KEY=")
 
 client = anthropic.Anthropic()
+cos_agent = Agent(client)
 
-# app — это наше веб-приложение. uvicorn будет его запускать.
 app = FastAPI()
 
 # CORS: фронт и бэк на разных адресах, поэтому браузеру нужно явно
@@ -79,19 +82,11 @@ def index():
 # POST /chat — фронт шлёт всю историю, мы спрашиваем Claude и возвращаем ответ.
 @app.post("/chat")
 def chat(req: ChatRequest):
-    # Если фронт прислал неизвестную модель — мягко падаем на дефолт.
     model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+    cos_agent.model = model
     try:
-        response = client.messages.create(
-            model=model,
-            # 1024 было для урока 1; для развёрнутых ответов и таблиц мало.
-            max_tokens=8192,
-            messages=[{"role": m.role, "content": m.content} for m in req.messages],
-        )
-        text = "".join(
-            block.text for block in response.content if block.type == "text"
-        )
+        messages = [{"role": m.role, "content": m.content} for m in req.messages]
+        text = cos_agent.respond(messages)
         return {"reply": text}
     except anthropic.APIError as e:
-        # Чтобы в браузере был понятный текст, а не падение сервера.
         return {"reply": f"Ошибка обращения к Claude: {e}"}
