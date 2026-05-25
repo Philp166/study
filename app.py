@@ -214,6 +214,14 @@ def api_add_message(chat_id: str, msg: Message):
     return {"ok": True}
 
 
+@app.get("/api/token-stats")
+def api_token_stats():
+    return {
+        **cos_agent.token_stats.to_dict(),
+        "context": cos_agent.get_context_pressure(),
+    }
+
+
 @app.post("/api/migrate")
 def api_migrate(req: MigrateRequest):
     for c in req.chats:
@@ -244,6 +252,12 @@ async def chat_stream(req: StreamRequest):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
             db.add_message(req.chat_id, "assistant", full_text)
+            usage_data = {
+                "type": "usage",
+                **cos_agent.token_stats.to_dict(),
+                "context": cos_agent.get_context_pressure(model),
+            }
+            yield f"data: {json.dumps(usage_data)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -311,6 +325,12 @@ async def voice_chat_stream(req: VoiceChatRequest):
                         yield f"data: {json.dumps({'type': 'audio', 'data': audio})}\n\n"
                 if req.chat_id and full_text:
                     db.add_message(req.chat_id, "assistant", full_text)
+                usage_data = {
+                    "type": "usage",
+                    **cos_agent.token_stats.to_dict(),
+                    "context": cos_agent.get_context_pressure(VOICE_MODEL),
+                }
+                yield f"data: {json.dumps(usage_data)}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'full_text': full_text})}\n\n"
                 break
 

@@ -354,6 +354,105 @@
     #send:active:not(:disabled) { transform: scale(0.94); }
     #send:disabled { background: #cfcfcf; cursor: default; }
 
+    /* ===== Панель токенов ===== */
+    .token-panel {
+      width: 100%;
+      max-width: 768px;
+      padding: 0 20px;
+    }
+
+    .token-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 8px 16px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background 0.15s;
+      user-select: none;
+    }
+    .token-bar:hover { background: #f4f4f4; }
+
+    .token-stat { display: flex; align-items: center; gap: 4px; }
+    .token-stat .label { opacity: 0.7; }
+    .token-stat .value { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+    .context-meter {
+      flex: 1;
+      height: 4px;
+      background: #e5e5e5;
+      border-radius: 2px;
+      overflow: hidden;
+      min-width: 60px;
+    }
+    .context-meter-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: #22c55e;
+      transition: width 0.4s ease, background 0.4s ease;
+    }
+    .context-meter-fill.moderate { background: #f59e0b; }
+    .context-meter-fill.high { background: #ef4444; }
+
+    .token-details {
+      display: none;
+      padding: 12px 16px;
+      margin-top: 6px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 12px;
+      color: var(--ink);
+    }
+    .token-details.open { display: block; }
+
+    .token-details-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .token-details-section h4 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .token-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+    .token-row .val { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    .token-warning {
+      margin-top: 8px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .token-warning.moderate { background: #fef3c7; color: #92400e; }
+    .token-warning.high { background: #fee2e2; color: #991b1b; }
+
+    .cache-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .cache-badge.hit  { background: #dcfce7; color: #166534; }
+    .cache-badge.miss { background: #f3f4f6; color: #6b7280; }
+
     /* На узких экранах сайдбар прячем */
     @media (max-width: 640px) {
       .sidebar { display: none; }
@@ -387,6 +486,60 @@
           </svg>
         </a>
       </header>
+      <div class="token-panel">
+        <div class="token-bar" id="token-bar" title="Нажмите для подробностей">
+          <div class="token-stat">
+            <span class="label">Вход:</span>
+            <span class="value" id="tb-input">—</span>
+          </div>
+          <div class="token-stat">
+            <span class="label">Выход:</span>
+            <span class="value" id="tb-output">—</span>
+          </div>
+          <div class="token-stat">
+            <span class="label">Кэш:</span>
+            <span class="value" id="tb-cache">—</span>
+          </div>
+          <div class="context-meter">
+            <div class="context-meter-fill" id="tb-meter" style="width:0%"></div>
+          </div>
+          <span id="tb-percent" style="font-variant-numeric:tabular-nums">0%</span>
+        </div>
+        <div class="token-details" id="token-details">
+          <div class="token-details-grid">
+            <div class="token-details-section">
+              <h4>Последний запрос</h4>
+              <div class="token-row"><span>Входные токены</span><span class="val" id="td-req-input">0</span></div>
+              <div class="token-row"><span>Выходные токены</span><span class="val" id="td-req-output">0</span></div>
+              <div class="token-row"><span>Записано в кэш</span><span class="val" id="td-req-cache-write">0</span></div>
+              <div class="token-row"><span>Прочитано из кэша</span><span class="val" id="td-req-cache-read">0</span></div>
+              <div class="token-row" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
+                <span>Эффективный вход</span>
+                <span class="val" id="td-req-effective">0</span>
+              </div>
+            </div>
+            <div class="token-details-section">
+              <h4>За сессию (всего)</h4>
+              <div class="token-row"><span>Входные токены</span><span class="val" id="td-cum-input">0</span></div>
+              <div class="token-row"><span>Выходные токены</span><span class="val" id="td-cum-output">0</span></div>
+              <div class="token-row"><span>Записано в кэш</span><span class="val" id="td-cum-cache-write">0</span></div>
+              <div class="token-row"><span>Прочитано из кэша</span><span class="val" id="td-cum-cache-read">0</span></div>
+              <div class="token-row" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
+                <span>Запросов</span>
+                <span class="val" id="td-cum-count">0</span>
+              </div>
+            </div>
+          </div>
+          <div class="token-details-section" style="margin-top:10px">
+            <h4>Контекстное окно</h4>
+            <div class="token-row"><span>Модель</span><span class="val" id="td-ctx-model">—</span></div>
+            <div class="token-row"><span>Окно</span><span class="val" id="td-ctx-window">—</span></div>
+            <div class="token-row"><span>Использовано</span><span class="val" id="td-ctx-used">—</span></div>
+            <div class="token-row"><span>Осталось</span><span class="val" id="td-ctx-remain">—</span></div>
+          </div>
+          <div id="td-warning"></div>
+        </div>
+      </div>
       <div id="transcript"></div>
       <div id="composer">
         <div class="pill">
@@ -709,6 +862,9 @@
                 typingEl.innerHTML = renderMarkdown(fullText);
                 transcriptEl.scrollTop = transcriptEl.scrollHeight;
               }
+              if (data.type === "usage") {
+                updateTokenPanel(data);
+              }
               if (data.type === "error") {
                 typingEl.textContent = "Ошибка: " + data.message;
               }
@@ -803,6 +959,83 @@
         console.log(`Migrated ${chats.length} chat(s) to server.`);
       } catch (e) {
         console.error("Migration failed:", e);
+      }
+    }
+
+    /* ========================================================
+       Token panel
+       ======================================================== */
+    const tokenBar = document.getElementById("token-bar");
+    const tokenDetails = document.getElementById("token-details");
+
+    tokenBar.addEventListener("click", () => {
+      tokenDetails.classList.toggle("open");
+    });
+
+    function fmtNum(n) {
+      if (n == null) return "—";
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+      if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+      return String(n);
+    }
+
+    function updateTokenPanel(data) {
+      if (!data || !data.last_request) return;
+      const req = data.last_request;
+      const cum = data.cumulative;
+      const ctx = data.context;
+
+      // Top bar
+      document.getElementById("tb-input").textContent = fmtNum(req.input_tokens);
+      document.getElementById("tb-output").textContent = fmtNum(req.output_tokens);
+
+      const cacheRead = req.cache_read_input_tokens || 0;
+      const tbCache = document.getElementById("tb-cache");
+      if (cacheRead > 0) {
+        tbCache.innerHTML = '<span class="cache-badge hit">HIT ' + fmtNum(cacheRead) + '</span>';
+      } else {
+        tbCache.innerHTML = '<span class="cache-badge miss">MISS</span>';
+      }
+
+      const pct = ctx ? ctx.usage_percent : 0;
+      const meter = document.getElementById("tb-meter");
+      meter.style.width = pct + "%";
+      meter.className = "context-meter-fill" + (pct > 75 ? " high" : pct > 50 ? " moderate" : "");
+      document.getElementById("tb-percent").textContent = pct + "%";
+
+      // Details: last request
+      document.getElementById("td-req-input").textContent = fmtNum(req.input_tokens);
+      document.getElementById("td-req-output").textContent = fmtNum(req.output_tokens);
+      document.getElementById("td-req-cache-write").textContent = fmtNum(req.cache_creation_input_tokens);
+      document.getElementById("td-req-cache-read").textContent = fmtNum(cacheRead);
+      const effective = req.input_tokens - cacheRead;
+      document.getElementById("td-req-effective").textContent = fmtNum(effective);
+
+      // Details: cumulative
+      if (cum) {
+        document.getElementById("td-cum-input").textContent = fmtNum(cum.total_input);
+        document.getElementById("td-cum-output").textContent = fmtNum(cum.total_output);
+        document.getElementById("td-cum-cache-write").textContent = fmtNum(cum.total_cache_creation);
+        document.getElementById("td-cum-cache-read").textContent = fmtNum(cum.total_cache_read);
+        document.getElementById("td-cum-count").textContent = cum.request_count;
+      }
+
+      // Details: context window
+      if (ctx) {
+        document.getElementById("td-ctx-model").textContent = ctx.model;
+        document.getElementById("td-ctx-window").textContent = fmtNum(ctx.context_window);
+        document.getElementById("td-ctx-used").textContent = fmtNum(ctx.tokens_used);
+        document.getElementById("td-ctx-remain").textContent = fmtNum(ctx.tokens_remaining);
+
+        const warningEl = document.getElementById("td-warning");
+        if (ctx.warning) {
+          const level = ctx.usage_percent > 75 ? "high" : "moderate";
+          warningEl.className = "token-warning " + level;
+          warningEl.textContent = ctx.warning;
+        } else {
+          warningEl.className = "";
+          warningEl.textContent = "";
+        }
       }
     }
 
