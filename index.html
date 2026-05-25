@@ -730,19 +730,49 @@
       sendBtn.disabled = true;
 
       const typingEl = showTyping();
+      let fullText = "";
 
       try {
-        const res = await fetch(API_BASE + "/chat", {
+        const res = await fetch(API_BASE + "/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ messages: chat.messages, model: chat.model }),
         });
-        const data = await res.json();
-        typingEl.innerHTML = renderMarkdown(data.reply);
-        chat.messages.push({ role: "assistant", content: data.reply });
-        chat.updatedAt = Date.now();
-        saveState();
-        renderSidebar();
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            if (!part.startsWith("data: ")) continue;
+            try {
+              const data = JSON.parse(part.slice(6));
+              if (data.type === "text") {
+                fullText += data.chunk;
+                typingEl.innerHTML = renderMarkdown(fullText);
+                transcriptEl.scrollTop = transcriptEl.scrollHeight;
+              }
+              if (data.type === "error") {
+                typingEl.textContent = "Ошибка: " + data.message;
+              }
+            } catch {}
+          }
+        }
+
+        if (fullText) {
+          chat.messages.push({ role: "assistant", content: fullText });
+          chat.updatedAt = Date.now();
+          saveState();
+          renderSidebar();
+        }
       } catch (e) {
         typingEl.textContent = "Не удалось связаться с сервером: " + e;
       } finally {

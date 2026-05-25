@@ -51,14 +51,50 @@ class Agent:
         self.max_tokens = max_tokens
         self.system_prompt = SYSTEM_PROMPT
 
-    def respond(self, messages: list[dict]) -> str:
+    def _prepare(self, messages, *, system_prompt=None):
+        sys_prompt = system_prompt or self.system_prompt
+        system = [
+            {
+                "type": "text",
+                "text": sys_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        prepared = [
+            {"role": m["role"], "content": m["content"]} for m in messages
+        ]
+        if len(prepared) >= 2:
+            target = prepared[-2]
+            target["content"] = [
+                {
+                    "type": "text",
+                    "text": target["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        return system, prepared
+
+    def respond(self, messages: list[dict], *, model=None, max_tokens=None, system_prompt=None) -> str:
         """Принимает историю диалога, возвращает текстовый ответ агента."""
+        system, prepared = self._prepare(messages, system_prompt=system_prompt)
         response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=self.system_prompt,
-            messages=messages,
+            model=model or self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            system=system,
+            messages=prepared,
         )
         return "".join(
             block.text for block in response.content if block.type == "text"
         )
+
+    def respond_stream(self, messages: list[dict], *, model=None, max_tokens=None, system_prompt=None):
+        """Генератор: yields текстовые чанки по мере генерации."""
+        system, prepared = self._prepare(messages, system_prompt=system_prompt)
+        with self.client.messages.stream(
+            model=model or self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            system=system,
+            messages=prepared,
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
