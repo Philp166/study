@@ -1,7 +1,7 @@
-import asyncio
 import base64
 import io
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,7 +53,25 @@ ALLOWED_MODELS = {
 }
 DEFAULT_MODEL = "claude-opus-4-6"
 
-TTS_VOICE = "ru-RU-DmitryNeural"
+TTS_VOICE = "ru-RU-SvetlanaNeural"
+VOICE_MODEL = "claude-sonnet-4-6"
+
+
+def strip_markdown(text: str) -> str:
+    """Убирает markdown-разметку, чтобы TTS не читал спецсимволы вслух."""
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^---+$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^>\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[\s]*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[\s]*\d+\.\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class Message(BaseModel):
@@ -96,8 +114,7 @@ def voice_page():
 
 @app.post("/voice/chat")
 async def voice_chat(req: VoiceChatRequest):
-    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
-    cos_agent.model = model
+    cos_agent.model = VOICE_MODEL
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
     messages.append({"role": "user", "content": req.text})
@@ -109,7 +126,8 @@ async def voice_chat(req: VoiceChatRequest):
 
     reply_audio_b64 = ""
     try:
-        communicate = edge_tts.Communicate(reply_text, TTS_VOICE)
+        clean_text = strip_markdown(reply_text)
+        communicate = edge_tts.Communicate(clean_text, TTS_VOICE)
         buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
