@@ -333,10 +333,8 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .msg-wrap.bot { gap: 10px; }
 
 .msg-avatar {
-  width: 28px; height: 28px; flex-shrink: 0; margin-top: 20px;
-  background: linear-gradient(135deg, #00f0ff, #6b5cff);
-  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
-  box-shadow: 0 0 14px rgba(0,240,255,.4);
+  width: 30px; height: 36px; flex-shrink: 0; margin-top: 16px;
+  position: relative;
 }
 
 .msg-meta {
