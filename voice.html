@@ -10,25 +10,31 @@
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="/agent.js"></script>
 </head>
 <body class="voice-page">
   <div class="crt-overlay"></div>
   <div class="vignette"></div>
 
   <div class="header">
+    <div class="runline top"></div>
     <a href="/" class="back-link">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
       </svg>
       Текстовый чат
     </a>
-    <span class="header-title">CoS — Голос</span>
+    <span class="header-title">
+      <span class="glitch flicker" data-text="ГОЛОС">ГОЛОС</span>
+      <span class="mono" style="font-size:10px;color:var(--ink-2);margin-left:8px">// VOICE.LINK</span>
+    </span>
     <button class="clear-btn" onclick="clearHistory()">Очистить</button>
   </div>
 
   <div id="transcript"></div>
 
   <div class="controls" id="controls">
+    <div class="holo-container" id="holo-face"></div>
     <div id="status">Нажми, чтобы начать разговор</div>
     <div id="live-text"></div>
     <button class="mic-btn" id="mic-btn" onclick="toggleSession()">
@@ -74,6 +80,17 @@
     let busy = false;
     let currentAudio = null;
     let audioCtx = null;
+
+    // HoloFace
+    let holoFace = null;
+    const holoContainer = document.getElementById("holo-face");
+    if (holoContainer && typeof createHoloFace === "function") {
+      holoFace = createHoloFace(holoContainer, { size: 220, state: "idle" });
+    }
+
+    function setHoloState(state) {
+      if (holoFace) holoFace.setState(state);
+    }
 
     async function apiCall(method, path, body) {
       const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -153,11 +170,13 @@
       switch (state) {
         case "idle":
           statusEl.textContent = hasSpeech ? "Нажми, чтобы начать разговор" : "";
+          setHoloState("idle");
           break;
         case "listening":
           statusEl.textContent = "Слушаю... говори свободно";
           micBtn.classList.add("listening");
           hintEl.textContent = "Нажми ещё раз, чтобы завершить";
+          setHoloState("listening");
           break;
         case "processing":
           statusEl.textContent = "Думаю...";
@@ -165,16 +184,19 @@
           micBtn.disabled = true;
           if (sendBtn) sendBtn.disabled = true;
           if (textInput) textInput.disabled = true;
+          setHoloState("thinking");
           break;
         case "speaking":
           statusEl.textContent = "Говорю...";
           micBtn.disabled = true;
           if (sendBtn) sendBtn.disabled = true;
           if (textInput) textInput.disabled = true;
+          setHoloState("speaking");
           break;
         case "error":
           statusEl.textContent = text || "Ошибка";
           statusEl.classList.add("error");
+          setHoloState("alert");
           break;
       }
     }
@@ -182,16 +204,39 @@
     function addBubble(role, text) {
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
-      const el = document.createElement("div");
-      el.className = "msg " + (role === "user" ? "user" : "bot");
+
       if (role === "user") {
-        el.textContent = text;
+        const wrap = document.createElement("div");
+        wrap.className = "msg-wrap user";
+        const msg = document.createElement("div");
+        msg.className = "msg user";
+        msg.textContent = text;
+        wrap.appendChild(msg);
+        transcriptEl.appendChild(wrap);
       } else {
-        el.innerHTML = renderMarkdown(text);
+        const wrap = document.createElement("div");
+        wrap.className = "msg-wrap bot";
+        const avatar = document.createElement("div");
+        avatar.className = "msg-avatar";
+        wrap.appendChild(avatar);
+        const body = document.createElement("div");
+        body.className = "msg-body";
+        const meta = document.createElement("div");
+        meta.className = "msg-meta";
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        meta.innerHTML = '<span class="badge">CoS</span><span class="time">' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + '</span>';
+        body.appendChild(meta);
+        const msg = document.createElement("div");
+        msg.className = "msg bot";
+        msg.innerHTML = renderMarkdown(text);
+        body.appendChild(msg);
+        wrap.appendChild(body);
+        transcriptEl.appendChild(wrap);
       }
-      transcriptEl.appendChild(el);
+
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      return el;
+      return transcriptEl.lastElementChild.querySelector('.msg') || transcriptEl.lastElementChild;
     }
 
     function renderTranscript() {
@@ -200,7 +245,7 @@
         const empty = document.createElement("div");
         empty.id = "empty";
         const strong = document.createElement("strong");
-        strong.textContent = "Голосовой чат с CoS";
+        strong.textContent = "ГОЛОС // CoS";
         empty.appendChild(strong);
         empty.appendChild(document.createTextNode("Нажми на микрофон и начни говорить свободно."));
         transcriptEl.appendChild(empty);

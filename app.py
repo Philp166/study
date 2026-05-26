@@ -270,6 +270,11 @@ def serve_css():
     return FileResponse(BASE_DIR / "styles.css")
 
 
+@app.get("/agent.js")
+def serve_agent_js():
+    return FileResponse(BASE_DIR / "agent.js", media_type="application/javascript")
+
+
 @app.get("/voice")
 def voice_page():
     return FileResponse(BASE_DIR / "voice.html")

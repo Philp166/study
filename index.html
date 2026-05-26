@@ -10,127 +10,131 @@
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="/agent.js"></script>
 </head>
 <body>
   <div class="crt-overlay"></div>
   <div class="vignette"></div>
 
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-header">
+  <div class="app-root">
+    <!-- ── TopBar ── -->
+    <header class="topbar">
+      <div class="runline top"></div>
+      <div class="topbar-brand">
+        <span class="t-display glitch flicker title" data-text="ШТАБ">ШТАБ</span>
+        <span class="mono sub">// CHIEF.OF.STAFF</span>
+      </div>
+      <div class="topbar-spacer"></div>
+      <select id="model-select" class="model-select" aria-label="Модель"></select>
+      <div class="token-compact" id="token-bar" title="Подробности">
+        <span>IN:<span class="tc-val" id="tb-input">—</span></span>
+        <span>OUT:<span class="tc-val" id="tb-output">—</span></span>
+        <span id="tb-cache">—</span>
+        <div class="context-meter"><div class="context-meter-fill" id="tb-meter" style="width:0%"></div></div>
+        <span class="tc-val" id="tb-percent">0%</span>
+      </div>
+      <span class="status-pill" id="agent-status">
+        <span class="dot dot-pulse"></span>
+        IDLE
+      </span>
+      <span class="mono clock" id="clock">00:00:00</span>
+    </header>
+
+    <!-- token details dropdown -->
+    <div class="token-details" id="token-details" style="position:relative">
+      <div class="token-details-grid">
+        <div class="token-details-section">
+          <h4>Последний запрос</h4>
+          <div class="token-row"><span>Входные</span><span class="val" id="td-req-input">0</span></div>
+          <div class="token-row"><span>Выходные</span><span class="val" id="td-req-output">0</span></div>
+          <div class="token-row"><span>Кэш запись</span><span class="val" id="td-req-cache-write">0</span></div>
+          <div class="token-row"><span>Кэш чтение</span><span class="val" id="td-req-cache-read">0</span></div>
+          <div class="token-row" style="margin-top:4px;border-top:1px solid var(--line);padding-top:4px">
+            <span>Эффективный</span><span class="val" id="td-req-effective">0</span>
+          </div>
+        </div>
+        <div class="token-details-section">
+          <h4>За сессию</h4>
+          <div class="token-row"><span>Входные</span><span class="val" id="td-cum-input">0</span></div>
+          <div class="token-row"><span>Выходные</span><span class="val" id="td-cum-output">0</span></div>
+          <div class="token-row"><span>Кэш запись</span><span class="val" id="td-cum-cache-write">0</span></div>
+          <div class="token-row"><span>Кэш чтение</span><span class="val" id="td-cum-cache-read">0</span></div>
+          <div class="token-row" style="margin-top:4px;border-top:1px solid var(--line);padding-top:4px">
+            <span>Запросов</span><span class="val" id="td-cum-count">0</span>
+          </div>
+        </div>
+        <div class="token-details-section">
+          <h4>Контекстное окно</h4>
+          <div class="token-row"><span>Модель</span><span class="val" id="td-ctx-model">—</span></div>
+          <div class="token-row"><span>Окно</span><span class="val" id="td-ctx-window">—</span></div>
+          <div class="token-row"><span>Использовано</span><span class="val" id="td-ctx-used">—</span></div>
+          <div class="token-row"><span>Осталось</span><span class="val" id="td-ctx-remain">—</span></div>
+        </div>
+      </div>
+      <div id="td-warning"></div>
+    </div>
+
+    <!-- ── Body: sidebar + main ── -->
+    <div class="app-body">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="logo">C/S</div>
+          <span class="brand-text">CoS</span>
+        </div>
         <button id="new-chat" class="new-chat-btn" type="button">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
           Новый чат
         </button>
-      </div>
-      <div id="chat-list" class="chat-list"></div>
-    </aside>
+        <div id="chat-list" class="chat-list"></div>
+      </aside>
 
-    <main class="main">
-      <header class="main-header">
-        <select id="model-select" class="model-select" aria-label="Модель"></select>
-        <a href="/voice" class="voice-link" title="Голосовой чат">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="1" width="6" height="11" rx="3"/>
-            <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
-            <line x1="12" y1="19" x2="12" y2="23"/>
-            <line x1="8" y1="23" x2="16" y2="23"/>
-          </svg>
-        </a>
-      </header>
-      <div class="token-panel">
-        <div class="token-bar" id="token-bar" title="Нажмите для подробностей">
-          <div class="token-stat">
-            <span class="label">Вход:</span>
-            <span class="value" id="tb-input">—</span>
-          </div>
-          <div class="token-stat">
-            <span class="label">Выход:</span>
-            <span class="value" id="tb-output">—</span>
-          </div>
-          <div class="token-stat">
-            <span class="label">Кэш:</span>
-            <span class="value" id="tb-cache">—</span>
-          </div>
-          <div class="context-meter">
-            <div class="context-meter-fill" id="tb-meter" style="width:0%"></div>
-          </div>
-          <span id="tb-percent" style="font-variant-numeric:tabular-nums">0%</span>
+      <main class="main">
+        <div class="session-header">
+          <span class="t-display glow-cyan" id="session-date" style="font-size:14px;letter-spacing:.04em"></span>
+          <div class="session-line"></div>
+          <span class="t-hud" id="session-time"></span>
         </div>
-        <div class="token-details" id="token-details">
-          <div class="token-details-grid">
-            <div class="token-details-section">
-              <h4>Последний запрос</h4>
-              <div class="token-row"><span>Входные токены</span><span class="val" id="td-req-input">0</span></div>
-              <div class="token-row"><span>Выходные токены</span><span class="val" id="td-req-output">0</span></div>
-              <div class="token-row"><span>Записано в кэш</span><span class="val" id="td-req-cache-write">0</span></div>
-              <div class="token-row"><span>Прочитано из кэша</span><span class="val" id="td-req-cache-read">0</span></div>
-              <div class="token-row" style="margin-top:4px;border-top:1px solid var(--line);padding-top:4px">
-                <span>Эффективный вход</span>
-                <span class="val" id="td-req-effective">0</span>
-              </div>
+        <div id="transcript"></div>
+        <div id="composer">
+          <div class="quick-actions">
+            <button class="quick-action" data-text="Объясни простыми словами">/01 Объяснить</button>
+            <button class="quick-action" data-text="Помоги с кодом">/02 Код</button>
+            <button class="quick-action" data-text="Сделай краткое содержание">/03 Саммари</button>
+            <button class="quick-action" data-text="Придумай идеи для проекта">/04 Идеи</button>
+          </div>
+          <div class="composer-row">
+            <span class="prompt-prefix mono">&gt;</span>
+            <div style="position:relative;flex:1">
+              <textarea id="input" rows="1" autocomplete="off" placeholder="Текст или команда..."></textarea>
             </div>
-            <div class="token-details-section">
-              <h4>За сессию (всего)</h4>
-              <div class="token-row"><span>Входные токены</span><span class="val" id="td-cum-input">0</span></div>
-              <div class="token-row"><span>Выходные токены</span><span class="val" id="td-cum-output">0</span></div>
-              <div class="token-row"><span>Записано в кэш</span><span class="val" id="td-cum-cache-write">0</span></div>
-              <div class="token-row"><span>Прочитано из кэша</span><span class="val" id="td-cum-cache-read">0</span></div>
-              <div class="token-row" style="margin-top:4px;border-top:1px solid var(--line);padding-top:4px">
-                <span>Запросов</span>
-                <span class="val" id="td-cum-count">0</span>
-              </div>
-            </div>
+            <a href="/voice" class="voice-link-inline" title="Голосовой чат">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/>
+              </svg>
+            </a>
+            <button id="send" class="btn btn-primary" style="padding:8px 14px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12l18-8-4 18-5-7-9-3z"/>
+              </svg>
+              Отправить
+            </button>
           </div>
-          <div class="token-details-section" style="margin-top:10px">
-            <h4>Контекстное окно</h4>
-            <div class="token-row"><span>Модель</span><span class="val" id="td-ctx-model">—</span></div>
-            <div class="token-row"><span>Окно</span><span class="val" id="td-ctx-window">—</span></div>
-            <div class="token-row"><span>Использовано</span><span class="val" id="td-ctx-used">—</span></div>
-            <div class="token-row"><span>Осталось</span><span class="val" id="td-ctx-remain">—</span></div>
-          </div>
-          <div id="td-warning"></div>
+          <div class="composer-hint">SHIFT+ENTER · перенос строки</div>
         </div>
-      </div>
-      <div id="transcript"></div>
-      <div id="composer">
-        <div class="pill">
-          <div class="field">
-            <textarea id="input" rows="1" autocomplete="off"></textarea>
-            <div id="ghost"></div>
-          </div>
-          <button id="send" aria-label="Отправить">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2.2"
-                 stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 19V5" />
-              <path d="M5 12l7-7 7 7" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    </main>
+      </main>
+    </div>
   </div>
 
   <script>
     const API = "";
 
-    const PLACEHOLDERS = [
-      "Спроси что-нибудь у Claude…",
-      "Объясни концепцию простыми словами",
-      "Помоги с кодом на Python",
-      "Сделай краткое содержание текста",
-      "Придумай идеи для проекта",
-    ];
-
     const MODELS = [
-      { id: "claude-opus-4-7",   label: "Claude Opus 4.7" },
-      { id: "claude-opus-4-6",   label: "Claude Opus 4.6" },
-      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-      { id: "claude-haiku-4-5",  label: "Claude Haiku 4.5" },
+      { id: "claude-opus-4-7",   label: "Opus 4.7" },
+      { id: "claude-opus-4-6",   label: "Opus 4.6" },
+      { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+      { id: "claude-haiku-4-5",  label: "Haiku 4.5" },
     ];
     const DEFAULT_MODEL = "claude-opus-4-6";
 
@@ -140,7 +144,6 @@
     const transcriptEl  = document.getElementById("transcript");
     const chatListEl    = document.getElementById("chat-list");
     const inputEl       = document.getElementById("input");
-    const ghostEl       = document.getElementById("ghost");
     const sendBtn       = document.getElementById("send");
     const newChatBtn    = document.getElementById("new-chat");
     const modelSelectEl = document.getElementById("model-select");
@@ -152,8 +155,36 @@
       modelSelectEl.appendChild(opt);
     }
 
+    // Clock
+    function updateClock() {
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      document.getElementById("clock").textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // Session header
+    function updateSessionHeader() {
+      const now = new Date();
+      const days = ['ВС','ПН','ВТ','СР','ЧТ','ПТ','СБ'];
+      const months = ['ЯНВА','ФЕВР','МАРТА','АПР','МАЯ','ИЮНЯ','ИЮЛЯ','АВГ','СЕНТ','ОКТ','НОЯБ','ДЕК'];
+      document.getElementById("session-date").textContent = `${days[now.getDay()]} · ${now.getDate()} ${months[now.getMonth()]}`;
+      const pad = n => String(n).padStart(2, '0');
+      document.getElementById("session-time").textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    }
+    updateSessionHeader();
+
+    // Quick actions
+    document.querySelectorAll('.quick-action').forEach(btn => {
+      btn.addEventListener('click', () => {
+        inputEl.value = btn.dataset.text;
+        inputEl.focus();
+      });
+    });
+
     /* ========================================================
-       State: server-backed via /api/chats
+       State
        ======================================================== */
     let chatsList = [];
     let currentId = null;
@@ -188,16 +219,11 @@
       currentMessages = data.messages || [];
     }
 
-    function currentChatMeta() {
-      return chatsList.find(c => c.id === currentId);
-    }
+    function currentChatMeta() { return chatsList.find(c => c.id === currentId); }
 
     async function createNewChat() {
       const empty = chatsList.find(c => !c.title);
-      if (empty) {
-        await switchChat(empty.id);
-        return;
-      }
+      if (empty) { await switchChat(empty.id); return; }
       const model = modelSelectEl.value || DEFAULT_MODEL;
       const { id } = await api("POST", "/api/chats", { model });
       currentId = id;
@@ -214,7 +240,7 @@
     }
 
     async function deleteChat(id) {
-      if (!confirm("Удалить этот чат? Действие нельзя отменить.")) return;
+      if (!confirm("Удалить этот чат?")) return;
       await api("DELETE", `/api/chats/${id}`);
       if (currentId === id) currentId = null;
       await loadChats();
@@ -237,9 +263,7 @@
       chatListEl.innerHTML = "";
       for (const c of chatsList) {
         const item = document.createElement("div");
-        item.className = "chat-item"
-          + (c.id === currentId ? " active" : "")
-          + (c.pinned ? " pinned" : "");
+        item.className = "chat-item" + (c.id === currentId ? " active" : "") + (c.pinned ? " pinned" : "");
 
         const title = document.createElement("div");
         title.className = "chat-item-title";
@@ -250,45 +274,44 @@
         actions.className = "chat-item-actions";
 
         const pinBtn = document.createElement("button");
-        pinBtn.className = "icon-btn pin-btn";
-        pinBtn.type = "button";
+        pinBtn.className = "icon-btn pin-btn"; pinBtn.type = "button";
         pinBtn.title = c.pinned ? "Открепить" : "Закрепить";
         pinBtn.innerHTML = PIN_SVG;
         pinBtn.addEventListener("click", (e) => { e.stopPropagation(); togglePin(c.id); });
 
         const trashBtn = document.createElement("button");
-        trashBtn.className = "icon-btn trash-btn";
-        trashBtn.type = "button";
-        trashBtn.title = "Удалить";
-        trashBtn.innerHTML = TRASH_SVG;
+        trashBtn.className = "icon-btn trash-btn"; trashBtn.type = "button";
+        trashBtn.title = "Удалить"; trashBtn.innerHTML = TRASH_SVG;
         trashBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteChat(c.id); });
 
         actions.appendChild(pinBtn);
         actions.appendChild(trashBtn);
         item.appendChild(actions);
-
         item.addEventListener("click", () => switchChat(c.id));
-
         chatListEl.appendChild(item);
       }
+    }
+
+    function fmtTime(date) {
+      if (!date) return "";
+      const d = new Date(date);
+      if (isNaN(d)) return "";
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     }
 
     function showEmptyState() {
       const empty = document.createElement("div");
       empty.id = "empty";
       const strong = document.createElement("strong");
-      strong.textContent = "Чат с Claude";
+      strong.textContent = "ШТАБ // CoS";
       empty.appendChild(strong);
-      empty.appendChild(document.createTextNode("Напиши сообщение — Claude помнит весь диалог."));
+      empty.appendChild(document.createTextNode("Напиши сообщение — агент помнит весь диалог."));
       transcriptEl.appendChild(empty);
     }
 
     function renderTranscript() {
       transcriptEl.innerHTML = "";
-      if (currentMessages.length === 0) {
-        showEmptyState();
-        return;
-      }
+      if (currentMessages.length === 0) { showEmptyState(); return; }
       for (const m of currentMessages) addBubble(m.role, m.content);
     }
 
@@ -300,7 +323,7 @@
     function renderAll() { renderSidebar(); renderTranscript(); syncModelSelect(); }
 
     /* ========================================================
-       Markdown
+       Markdown + Bubbles
        ======================================================== */
     function renderMarkdown(text) {
       return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
@@ -310,59 +333,72 @@
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
 
-      const el = document.createElement("div");
-      el.className = "msg " + (role === "user" ? "user" : "bot");
       if (role === "user") {
-        el.textContent = text;
+        const wrap = document.createElement("div");
+        wrap.className = "msg-wrap user";
+        const msg = document.createElement("div");
+        msg.className = "msg user";
+        msg.textContent = text;
+        wrap.appendChild(msg);
+        transcriptEl.appendChild(wrap);
       } else {
-        el.innerHTML = renderMarkdown(text);
+        const wrap = document.createElement("div");
+        wrap.className = "msg-wrap bot";
+        const avatar = document.createElement("div");
+        avatar.className = "msg-avatar";
+        wrap.appendChild(avatar);
+        const body = document.createElement("div");
+        body.className = "msg-body";
+        const meta = document.createElement("div");
+        meta.className = "msg-meta";
+        meta.innerHTML = '<span class="badge">CoS</span><span class="time">' + fmtTime(new Date()) + '</span>';
+        body.appendChild(meta);
+        const msg = document.createElement("div");
+        msg.className = "msg bot";
+        msg.innerHTML = renderMarkdown(text);
+        body.appendChild(msg);
+        wrap.appendChild(body);
+        transcriptEl.appendChild(wrap);
       }
-      transcriptEl.appendChild(el);
+
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      return el;
+      return transcriptEl.lastElementChild.querySelector('.msg');
     }
 
     function showTyping() {
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
-      const el = document.createElement("div");
-      el.className = "msg bot";
-      el.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
-      transcriptEl.appendChild(el);
+      const wrap = document.createElement("div");
+      wrap.className = "msg-wrap bot";
+      const avatar = document.createElement("div");
+      avatar.className = "msg-avatar";
+      wrap.appendChild(avatar);
+      const body = document.createElement("div");
+      body.className = "msg-body";
+      const meta = document.createElement("div");
+      meta.className = "msg-meta";
+      meta.innerHTML = '<span class="badge">CoS</span>';
+      body.appendChild(meta);
+      const msg = document.createElement("div");
+      msg.className = "msg bot";
+      msg.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
+      body.appendChild(msg);
+      wrap.appendChild(body);
+      transcriptEl.appendChild(wrap);
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      return el;
+      return msg;
     }
 
     /* ========================================================
-       Animated placeholder
+       Input
        ======================================================== */
-    let phraseIdx = 0;
-    ghostEl.textContent = PLACEHOLDERS[0];
-
-    function refreshGhost() {
-      const idle = !inputEl.value && document.activeElement !== inputEl;
-      ghostEl.classList.toggle("hide", !idle);
-    }
-    setInterval(() => {
-      if (inputEl.value || document.activeElement === inputEl) return;
-      ghostEl.classList.add("swap");
-      setTimeout(() => {
-        phraseIdx = (phraseIdx + 1) % PLACEHOLDERS.length;
-        ghostEl.textContent = PLACEHOLDERS[phraseIdx];
-        ghostEl.classList.remove("swap");
-      }, 350);
-    }, 3000);
-
-    inputEl.addEventListener("focus", refreshGhost);
-    inputEl.addEventListener("blur", refreshGhost);
     inputEl.addEventListener("input", () => {
-      refreshGhost();
       inputEl.style.height = "auto";
       inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
     });
 
     /* ========================================================
-       Send message
+       Send
        ======================================================== */
     async function send() {
       const text = inputEl.value.trim();
@@ -370,7 +406,6 @@
 
       addBubble("user", text);
       currentMessages.push({ role: "user", content: text });
-
       await api("POST", `/api/chats/${currentId}/messages`, { role: "user", content: text });
 
       const meta = currentChatMeta();
@@ -383,8 +418,8 @@
 
       inputEl.value = "";
       inputEl.style.height = "auto";
-      refreshGhost();
       sendBtn.disabled = true;
+      document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> THINKING';
 
       const typingEl = showTyping();
       let fullText = "";
@@ -403,26 +438,21 @@
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const parts = buffer.split("\n\n");
           buffer = parts.pop();
-
           for (const part of parts) {
             if (!part.startsWith("data: ")) continue;
             try {
               const data = JSON.parse(part.slice(6));
               if (data.type === "text") {
+                if (!fullText) document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> SPEAKING';
                 fullText += data.chunk;
                 typingEl.innerHTML = renderMarkdown(fullText);
                 transcriptEl.scrollTop = transcriptEl.scrollHeight;
               }
-              if (data.type === "usage") {
-                updateTokenPanel(data);
-              }
-              if (data.type === "error") {
-                typingEl.textContent = "Ошибка: " + data.message;
-              }
+              if (data.type === "usage") updateTokenPanel(data);
+              if (data.type === "error") typingEl.textContent = "Ошибка: " + data.message;
             } catch {}
           }
         }
@@ -436,6 +466,7 @@
         typingEl.textContent = "Не удалось связаться с сервером: " + e;
       } finally {
         sendBtn.disabled = false;
+        document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> IDLE';
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
         inputEl.focus();
       }
@@ -452,20 +483,16 @@
     });
 
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        send();
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     });
 
     /* ========================================================
-       Migration from localStorage → server
+       Migration
        ======================================================== */
     async function migrateFromLocalStorage() {
       const STORAGE_KEY = "claude_chat_v2";
       const OLD_KEY = "claude_chat_history";
       let raw = null;
-
       try { raw = localStorage.getItem(STORAGE_KEY); } catch {}
       if (!raw) {
         try {
@@ -475,46 +502,23 @@
             if (msgs.length > 0) {
               const now = Date.now();
               const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-              raw = JSON.stringify({
-                currentId: id,
-                chats: { [id]: { id, title: "", pinned: false, createdAt: now, updatedAt: now, messages: msgs, model: DEFAULT_MODEL } }
-              });
+              raw = JSON.stringify({ currentId: id, chats: { [id]: { id, title: "", pinned: false, createdAt: now, updatedAt: now, messages: msgs, model: DEFAULT_MODEL } } });
             }
           }
         } catch {}
       }
-
       if (!raw) return;
-
       try {
         const state = JSON.parse(raw);
         if (!state || !state.chats) return;
-
         const chats = Object.values(state.chats)
           .filter(c => c.messages && c.messages.length > 0)
-          .map(c => ({
-            id: c.id,
-            title: c.title || "",
-            pinned: !!c.pinned,
-            model: c.model || DEFAULT_MODEL,
-            createdAt: c.createdAt || Date.now(),
-            updatedAt: c.updatedAt || Date.now(),
-            messages: c.messages,
-          }));
-
-        if (chats.length === 0) {
-          localStorage.removeItem(STORAGE_KEY);
-          localStorage.removeItem(OLD_KEY);
-          return;
-        }
-
+          .map(c => ({ id: c.id, title: c.title || "", pinned: !!c.pinned, model: c.model || DEFAULT_MODEL, createdAt: c.createdAt || Date.now(), updatedAt: c.updatedAt || Date.now(), messages: c.messages }));
+        if (chats.length === 0) { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(OLD_KEY); return; }
         await api("POST", "/api/migrate", { chats });
         localStorage.removeItem(STORAGE_KEY);
         localStorage.removeItem(OLD_KEY);
-        console.log(`Migrated ${chats.length} chat(s) to server.`);
-      } catch (e) {
-        console.error("Migration failed:", e);
-      }
+      } catch (e) { console.error("Migration failed:", e); }
     }
 
     /* ========================================================
@@ -522,10 +526,7 @@
        ======================================================== */
     const tokenBar = document.getElementById("token-bar");
     const tokenDetails = document.getElementById("token-details");
-
-    tokenBar.addEventListener("click", () => {
-      tokenDetails.classList.toggle("open");
-    });
+    tokenBar.addEventListener("click", () => { tokenDetails.classList.toggle("open"); });
 
     function fmtNum(n) {
       if (n == null) return "—";
@@ -536,21 +537,15 @@
 
     function updateTokenPanel(data) {
       if (!data || !data.last_request) return;
-      const req = data.last_request;
-      const cum = data.cumulative;
-      const ctx = data.context;
+      const req = data.last_request, cum = data.cumulative, ctx = data.context;
 
-      // Top bar
       document.getElementById("tb-input").textContent = fmtNum(req.input_tokens);
       document.getElementById("tb-output").textContent = fmtNum(req.output_tokens);
-
       const cacheRead = req.cache_read_input_tokens || 0;
       const tbCache = document.getElementById("tb-cache");
-      if (cacheRead > 0) {
-        tbCache.innerHTML = '<span class="cache-badge hit">HIT ' + fmtNum(cacheRead) + '</span>';
-      } else {
-        tbCache.innerHTML = '<span class="cache-badge miss">MISS</span>';
-      }
+      tbCache.innerHTML = cacheRead > 0
+        ? '<span class="cache-badge hit">HIT ' + fmtNum(cacheRead) + '</span>'
+        : '<span class="cache-badge miss">MISS</span>';
 
       const pct = ctx ? ctx.usage_percent : 0;
       const meter = document.getElementById("tb-meter");
@@ -558,15 +553,12 @@
       meter.className = "context-meter-fill" + (pct > 75 ? " high" : pct > 50 ? " moderate" : "");
       document.getElementById("tb-percent").textContent = pct + "%";
 
-      // Details: last request
       document.getElementById("td-req-input").textContent = fmtNum(req.input_tokens);
       document.getElementById("td-req-output").textContent = fmtNum(req.output_tokens);
       document.getElementById("td-req-cache-write").textContent = fmtNum(req.cache_creation_input_tokens);
       document.getElementById("td-req-cache-read").textContent = fmtNum(cacheRead);
-      const effective = req.input_tokens - cacheRead;
-      document.getElementById("td-req-effective").textContent = fmtNum(effective);
+      document.getElementById("td-req-effective").textContent = fmtNum(req.input_tokens - cacheRead);
 
-      // Details: cumulative
       if (cum) {
         document.getElementById("td-cum-input").textContent = fmtNum(cum.total_input);
         document.getElementById("td-cum-output").textContent = fmtNum(cum.total_output);
@@ -574,23 +566,14 @@
         document.getElementById("td-cum-cache-read").textContent = fmtNum(cum.total_cache_read);
         document.getElementById("td-cum-count").textContent = cum.request_count;
       }
-
-      // Details: context window
       if (ctx) {
         document.getElementById("td-ctx-model").textContent = ctx.model;
         document.getElementById("td-ctx-window").textContent = fmtNum(ctx.context_window);
         document.getElementById("td-ctx-used").textContent = fmtNum(ctx.tokens_used);
         document.getElementById("td-ctx-remain").textContent = fmtNum(ctx.tokens_remaining);
-
-        const warningEl = document.getElementById("td-warning");
-        if (ctx.warning) {
-          const level = ctx.usage_percent > 75 ? "high" : "moderate";
-          warningEl.className = "token-warning " + level;
-          warningEl.textContent = ctx.warning;
-        } else {
-          warningEl.className = "";
-          warningEl.textContent = "";
-        }
+        const w = document.getElementById("td-warning");
+        if (ctx.warning) { w.className = "token-warning " + (ctx.usage_percent > 75 ? "high" : "moderate"); w.textContent = ctx.warning; }
+        else { w.className = ""; w.textContent = ""; }
       }
     }
 
