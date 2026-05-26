@@ -568,8 +568,114 @@ body.voice-page .msg { max-width: 85%; }
 .send-btn:hover { background: #5cf8ff; }
 .send-btn:disabled { background: var(--line); color: var(--ink-3); cursor: default; }
 
-/* ── Responsive ───────────────────────────────────────── */
+/* ── Hamburger ────────────────────────────────────────── */
+.hamburger {
+  display: none;
+  flex-direction: column; justify-content: center; gap: 5px;
+  width: 36px; height: 36px; padding: 8px;
+  background: transparent; border: 0; cursor: pointer; flex-shrink: 0;
+}
+.hamburger span {
+  display: block; width: 100%; height: 2px; border-radius: 1px;
+  background: var(--ink-1); transition: transform .2s, opacity .2s;
+}
+.hamburger:hover span { background: var(--cyan); }
+
+/* ── Drawer overlay ──────────────────────────────────── */
+.drawer-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(5,6,20,.75); z-index: 199;
+  backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+}
+.drawer-overlay.open { display: block; }
+
+/* ── Sidebar model (hidden on desktop) ───────────────── */
+.sidebar-model-wrap { display: none; }
+.sidebar-model-wrap .model-select { width: 100%; padding: 8px 30px 8px 10px; }
+
+/* ── Send button text ────────────────────────────────── */
+.send-text { white-space: nowrap; }
+
+/* ═══════════════════════════════════════════════════════
+   RESPONSIVE — mobile ≤640px
+   ═══════════════════════════════════════════════════════ */
 @media (max-width: 640px) {
-  .sidebar { display: none; }
+  /* ── TopBar ── */
+  .topbar { padding: 0 10px; gap: 8px; height: 48px; }
+  .topbar-brand .title { font-size: 18px; }
   .topbar-brand .sub { display: none; }
+  .topbar-brand { gap: 0; }
+  .topbar .model-select { display: none; }
+  .token-compact { display: none; }
+  .topbar .clock { display: none; }
+  .hamburger { display: flex; }
+  .status-pill { font-size: 8px; padding: 2px 6px; gap: 4px; letter-spacing: .08em; }
+
+  /* ── Token details (if opened) ── */
+  .token-details { top: 48px; padding: 10px 12px; }
+  .token-details-grid { grid-template-columns: 1fr; gap: 10px; }
+
+  /* ── Sidebar → drawer ── */
+  .sidebar {
+    position: fixed; top: 0; bottom: 0;
+    left: -280px;
+    width: 280px; z-index: 200;
+    transition: left .25s cubic-bezier(.4,0,.2,1);
+    border-right-color: var(--line-2);
+  }
+  .sidebar.open { left: 0; }
+  .sidebar-model-wrap { display: block; padding: 0 10px 6px; }
+
+  /* ── Session header ── */
+  .session-header { padding: 10px 12px 6px; gap: 8px; }
+  .session-header .session-line { display: none; }
+  .session-header .t-hud { display: none; }
+  .session-header .t-display { font-size: 12px !important; }
+
+  /* ── Transcript ── */
+  #transcript { padding: 4px 10px 10px; gap: 12px; }
+
+  /* ── Messages ── */
+  .msg { padding: 10px 12px; font-size: 13.5px; --c: 8px; }
+  .msg.user { max-width: 85%; }
+  .msg-avatar { width: 24px; height: 29px; }
+  .msg-wrap.bot { gap: 6px; }
+  .msg-meta { font-size: 9px; gap: 6px; }
+  .msg-meta .badge { font-size: 9px; }
+
+  /* ── Composer ── */
+  #composer { padding: 0 10px 10px; }
+  .quick-actions {
+    overflow-x: auto; flex-wrap: nowrap;
+    padding: 8px 0 6px; gap: 6px;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  }
+  .quick-actions::-webkit-scrollbar { display: none; }
+  .quick-action { padding: 6px 10px; font-size: 9px; flex-shrink: 0; }
+  .composer-row {
+    padding: 8px 8px 8px 12px; gap: 6px;
+    clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  }
+  .composer-row .prompt-prefix { display: none; }
+  .composer-hint { display: none; }
+  .send-text { display: none; }
+  #send { padding: 8px 10px; min-width: 0; }
+  .voice-link-inline { width: 30px; height: 30px; }
+
+  /* ── Voice page ── */
+  body.voice-page .header { padding: 8px 10px; }
+  body.voice-page .header-title { font-size: 14px; }
+  body.voice-page .header-title .mono { display: none; }
+  body.voice-page #transcript { padding: 10px 12px 6px; }
+  body.voice-page .msg { max-width: 92%; }
+  body.voice-page .controls { padding: 6px 12px 16px; gap: 6px; }
+  body.voice-page .holo-container {
+    transform: scale(0.68); transform-origin: center top;
+    margin-bottom: -30px;
+  }
+  body.voice-page .mic-btn { width: 58px; height: 58px; }
+  body.voice-page #status { font-size: 11px; }
+  body.voice-page .text-input-row { max-width: 100%; }
+  body.voice-page #voice-text-input { padding: 10px 12px; font-size: 13.5px; }
+  body.voice-page .send-btn { width: 42px; height: 42px; }
 }
