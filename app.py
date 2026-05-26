@@ -265,6 +265,11 @@ async def chat_stream(req: StreamRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+@app.get("/styles.css")
+def serve_css():
+    return FileResponse(BASE_DIR / "styles.css")
+
+
 @app.get("/voice")
 def voice_page():
     return FileResponse(BASE_DIR / "voice.html")
