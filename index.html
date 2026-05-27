@@ -693,7 +693,7 @@
     let wakeWord = null;
     if (typeof createWakeWordDetector === "function") {
       wakeWord = createWakeWordDetector({
-        onDetected() { window.location.href = "/voice"; },
+        onDetected() { window.location.href = "/voice?wakeword=1"; },
         onStateChange() { updateWwUI(); },
       });
     }

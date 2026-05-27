@@ -535,6 +535,14 @@
       await migrateVoiceLocalStorage();
       await ensureVoiceChat();
       renderTranscript();
+
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("wakeword") === "1") {
+        history.replaceState(null, "", "/voice");
+        unlockAudio();
+        if (hasSpeech) startSession();
+        await processVoice("Привет");
+      }
     })();
 
     const voiceInput = document.getElementById("voice-text-input");
