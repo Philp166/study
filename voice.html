@@ -46,6 +46,26 @@
       </svg>
     </button>
     <div class="hint" id="hint"></div>
+    <div class="wakeword-bar" id="wakeword-bar">
+      <button class="wakeword-toggle" id="wakeword-toggle" type="button" title="Включить/выключить кодовую фразу">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+      <span class="wakeword-label" id="wakeword-label"></span>
+      <button class="wakeword-edit-btn" id="wakeword-edit-btn" type="button" title="Настроить фразу">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+    <div class="wakeword-settings" id="wakeword-settings">
+      <label class="wakeword-settings-label">Кодовая фраза</label>
+      <div class="wakeword-settings-row">
+        <input type="text" class="wakeword-input" id="wakeword-input" placeholder="например: привет штаб" autocomplete="off" />
+        <button class="wakeword-save" id="wakeword-save" type="button">OK</button>
+      </div>
+    </div>
     <div class="text-input-row" id="text-input-row">
       <input type="text" id="voice-text-input" placeholder="Напиши сообщение..." autocomplete="off" />
       <button class="send-btn" id="voice-send-btn" onclick="sendTextMessage()">
@@ -526,6 +546,82 @@
         }
       });
     }
+
+    // ── Wake Word ──
+    const wwToggle = document.getElementById("wakeword-toggle");
+    const wwLabel = document.getElementById("wakeword-label");
+    const wwEditBtn = document.getElementById("wakeword-edit-btn");
+    const wwSettings = document.getElementById("wakeword-settings");
+    const wwInput = document.getElementById("wakeword-input");
+    const wwSave = document.getElementById("wakeword-save");
+    const wwBar = document.getElementById("wakeword-bar");
+
+    let wakeWord = null;
+    if (typeof createWakeWordDetector === "function") {
+      wakeWord = createWakeWordDetector({
+        onDetected() {
+          unlockAudio();
+          if (!sessionActive && !busy) startSession();
+        },
+        onStateChange(state) {
+          updateWakeWordUI();
+        },
+      });
+    }
+
+    function updateWakeWordUI() {
+      if (!wakeWord) { wwBar.style.display = "none"; return; }
+      const on = wakeWord.isEnabled();
+      const phrase = wakeWord.getPhrase();
+      wwToggle.classList.toggle("active", on);
+      wwLabel.textContent = on
+        ? "«" + phrase + "» — слушаю..."
+        : "Кодовая фраза выкл.";
+      wwBar.classList.toggle("active", on && wakeWord.isActive());
+    }
+
+    wwToggle.addEventListener("click", () => {
+      if (!wakeWord) return;
+      wakeWord.toggle();
+      updateWakeWordUI();
+    });
+
+    wwEditBtn.addEventListener("click", () => {
+      const open = wwSettings.classList.toggle("open");
+      if (open) {
+        wwInput.value = wakeWord ? wakeWord.getPhrase() : "";
+        wwInput.focus();
+      }
+    });
+
+    wwSave.addEventListener("click", saveWakePhrase);
+    wwInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveWakePhrase(); }
+    });
+
+    function saveWakePhrase() {
+      const val = wwInput.value.trim();
+      if (!val || !wakeWord) return;
+      wakeWord.setPhrase(val);
+      wwSettings.classList.remove("open");
+      updateWakeWordUI();
+    }
+
+    // Stop wake word when voice session starts, restart when it ends
+    const _origStart = startSession;
+    const _origStop = stopSession;
+    startSession = function() {
+      if (wakeWord) wakeWord.stop();
+      _origStart();
+    };
+    stopSession = function() {
+      _origStop();
+      if (wakeWord && wakeWord.isEnabled()) wakeWord.start();
+    };
+
+    // Auto-start wake word if enabled
+    if (wakeWord && wakeWord.isEnabled()) wakeWord.start();
+    updateWakeWordUI();
   </script>
 </body>
 </html>

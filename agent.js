@@ -207,3 +207,98 @@
   window.createHoloFace = createHoloFace;
   window.HOLO_PRESETS = PRESETS;
 })();
+
+/* ── Wake Word Detector ── */
+(function() {
+  const STORAGE_ENABLED = 'cos_wakeword_enabled';
+  const STORAGE_PHRASE  = 'cos_wakeword_phrase';
+  const DEFAULT_PHRASE  = 'привет штаб';
+
+  function normalize(text) {
+    return text.toLowerCase().replace(/[.,!?;:«»"'()]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function createWakeWordDetector(opts) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
+
+    let recognition = null;
+    let active = false;
+    let enabled = localStorage.getItem(STORAGE_ENABLED) === 'true';
+    let phrase = normalize(localStorage.getItem(STORAGE_PHRASE) || DEFAULT_PHRASE);
+    const onDetected = opts.onDetected;
+    const onStateChange = opts.onStateChange || (() => {});
+
+    function start() {
+      if (!enabled || active) return;
+      recognition = new SR();
+      recognition.lang = 'ru-RU';
+      recognition.continuous = true;
+      recognition.interimResults = false;
+
+      recognition.onresult = (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            const text = normalize(e.results[i][0].transcript);
+            if (text.includes(phrase)) {
+              stop();
+              onDetected(text);
+              return;
+            }
+          }
+        }
+      };
+
+      recognition.onend = () => {
+        if (active) {
+          setTimeout(() => { if (active) try { recognition.start(); } catch {} }, 200);
+        }
+      };
+
+      recognition.onerror = (e) => {
+        if (e.error === 'not-allowed') {
+          active = false;
+          onStateChange('denied');
+        }
+      };
+
+      try {
+        recognition.start();
+        active = true;
+        onStateChange('listening');
+      } catch {}
+    }
+
+    function stop() {
+      active = false;
+      if (recognition) { recognition.abort(); recognition = null; }
+      onStateChange('idle');
+    }
+
+    function toggle() {
+      enabled = !enabled;
+      localStorage.setItem(STORAGE_ENABLED, String(enabled));
+      if (enabled) start(); else stop();
+      return enabled;
+    }
+
+    function setPhrase(p) {
+      phrase = normalize(p);
+      localStorage.setItem(STORAGE_PHRASE, p.trim());
+    }
+
+    return {
+      start, stop, toggle, setPhrase,
+      getPhrase() { return localStorage.getItem(STORAGE_PHRASE) || DEFAULT_PHRASE; },
+      isEnabled() { return enabled; },
+      isActive()  { return active; },
+    };
+  }
+
+  window.createWakeWordDetector = createWakeWordDetector;
+  window.WAKEWORD_DEFAULT_PHRASE = DEFAULT_PHRASE;
+  window.getWakeWordSettings = () => ({
+    enabled: localStorage.getItem(STORAGE_ENABLED) === 'true',
+    phrase: localStorage.getItem(STORAGE_PHRASE) || DEFAULT_PHRASE,
+  });
+})();

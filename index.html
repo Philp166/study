@@ -132,6 +132,12 @@
                 <rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/>
               </svg>
             </a>
+            <button class="wakeword-btn-inline" id="wakeword-btn" type="button" title="Кодовая фраза для активации голоса">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
+              </svg>
+              <span class="ww-dot" id="ww-dot"></span>
+            </button>
             <button id="send" class="btn btn-primary" style="padding:8px 14px">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M3 12l18-8-4 18-5-7-9-3z"/>
@@ -140,6 +146,20 @@
             </button>
           </div>
           <div class="composer-hint">SHIFT+ENTER · перенос строки</div>
+          <div class="wakeword-popup" id="wakeword-popup">
+            <div class="wakeword-popup-header">
+              <span>Кодовая фраза</span>
+              <label class="wakeword-switch">
+                <input type="checkbox" id="ww-enabled" />
+                <span class="wakeword-slider"></span>
+              </label>
+            </div>
+            <div class="wakeword-popup-body">
+              <input type="text" class="wakeword-input" id="ww-phrase-input" placeholder="например: привет штаб" autocomplete="off" />
+              <button class="wakeword-save" id="ww-phrase-save" type="button">OK</button>
+            </div>
+            <div class="wakeword-popup-hint" id="ww-status-hint"></div>
+          </div>
         </div>
       </main>
     </div>
@@ -658,6 +678,73 @@
         else { w.className = ""; w.textContent = ""; }
       }
     }
+
+    /* ========================================================
+       Wake Word
+       ======================================================== */
+    const wwBtn = document.getElementById("wakeword-btn");
+    const wwDot = document.getElementById("ww-dot");
+    const wwPopup = document.getElementById("wakeword-popup");
+    const wwEnabledCb = document.getElementById("ww-enabled");
+    const wwPhraseInput = document.getElementById("ww-phrase-input");
+    const wwPhraseSave = document.getElementById("ww-phrase-save");
+    const wwStatusHint = document.getElementById("ww-status-hint");
+
+    let wakeWord = null;
+    if (typeof createWakeWordDetector === "function") {
+      wakeWord = createWakeWordDetector({
+        onDetected() { window.location.href = "/voice"; },
+        onStateChange() { updateWwUI(); },
+      });
+    }
+
+    function updateWwUI() {
+      if (!wakeWord) { wwBtn.style.display = "none"; return; }
+      const on = wakeWord.isEnabled();
+      const active = wakeWord.isActive();
+      wwBtn.classList.toggle("active", on);
+      wwDot.classList.toggle("pulse", active);
+      wwEnabledCb.checked = on;
+      wwStatusHint.textContent = active
+        ? "Слушаю «" + wakeWord.getPhrase() + "»..."
+        : on ? "Ожидание микрофона..." : "";
+    }
+
+    wwBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      wwPopup.classList.toggle("open");
+      if (wwPopup.classList.contains("open")) {
+        wwPhraseInput.value = wakeWord ? wakeWord.getPhrase() : "";
+        updateWwUI();
+      }
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!wwPopup.contains(e.target) && e.target !== wwBtn && !wwBtn.contains(e.target)) {
+        wwPopup.classList.remove("open");
+      }
+    });
+
+    wwEnabledCb.addEventListener("change", () => {
+      if (!wakeWord) return;
+      const want = wwEnabledCb.checked;
+      if (want !== wakeWord.isEnabled()) wakeWord.toggle();
+      updateWwUI();
+    });
+
+    function saveWwPhrase() {
+      const val = wwPhraseInput.value.trim();
+      if (!val || !wakeWord) return;
+      wakeWord.setPhrase(val);
+      updateWwUI();
+    }
+    wwPhraseSave.addEventListener("click", saveWwPhrase);
+    wwPhraseInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveWwPhrase(); }
+    });
+
+    if (wakeWord && wakeWord.isEnabled()) wakeWord.start();
+    updateWwUI();
 
     /* ========================================================
        Init
