@@ -121,6 +121,25 @@ CREATE TABLE IF NOT EXISTS usage_archive (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens     INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS chat_strategy_settings (
+    chat_id                       TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    rolling_summary_enabled       INTEGER NOT NULL DEFAULT 1,
+    rolling_summary_threshold_pct INTEGER NOT NULL DEFAULT 35,
+    sliding_window_enabled        INTEGER NOT NULL DEFAULT 0,
+    sliding_window_size           INTEGER NOT NULL DEFAULT 20,
+    sticky_facts_enabled          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS chat_facts (
+    id         SERIAL PRIMARY KEY,
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    UNIQUE(chat_id, key)
+);
 """
 
 _SCHEMA_SQLITE = """
@@ -174,6 +193,25 @@ CREATE TABLE IF NOT EXISTS usage_archive (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens     INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS chat_strategy_settings (
+    chat_id                       TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    rolling_summary_enabled       INTEGER NOT NULL DEFAULT 1,
+    rolling_summary_threshold_pct INTEGER NOT NULL DEFAULT 35,
+    sliding_window_enabled        INTEGER NOT NULL DEFAULT 0,
+    sliding_window_size           INTEGER NOT NULL DEFAULT 20,
+    sticky_facts_enabled          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS chat_facts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(chat_id, key)
+);
 """
 
 
@@ -185,6 +223,25 @@ def init_db():
             conn.commit()
         else:
             conn.executescript(_SCHEMA_SQLITE)
+
+        # Migrate: ensure every existing chat has a strategy_settings row
+        if _PG:
+            _execute(
+                conn,
+                "INSERT INTO chat_strategy_settings (chat_id) "
+                "SELECT id FROM chats WHERE id NOT IN "
+                "(SELECT chat_id FROM chat_strategy_settings) "
+                "ON CONFLICT DO NOTHING",
+            )
+        else:
+            _execute(
+                conn,
+                "INSERT OR IGNORE INTO chat_strategy_settings (chat_id) "
+                "SELECT id FROM chats WHERE id NOT IN "
+                "(SELECT chat_id FROM chat_strategy_settings)",
+            )
+        conn.commit()
+
     engine = "PostgreSQL" if _PG else "SQLite"
     print(f"DB: {engine} ready")
 
@@ -233,6 +290,19 @@ def create_chat(*, chat_id=None, title="", pinned=False, model="claude-sonnet-4-
             f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P})",
             (cid, title, int(pinned), model, ca, ua),
         )
+        if _PG:
+            _execute(
+                conn,
+                f"INSERT INTO chat_strategy_settings (chat_id) VALUES ({_P}) "
+                f"ON CONFLICT DO NOTHING",
+                (cid,),
+            )
+        else:
+            _execute(
+                conn,
+                f"INSERT OR IGNORE INTO chat_strategy_settings (chat_id) VALUES ({_P})",
+                (cid,),
+            )
         conn.commit()
     return cid
 
@@ -474,7 +544,6 @@ def import_chat(chat_id: str, title: str, pinned: bool, model: str,
 
 _SETTING_DEFAULTS = {
     "tts_voice": "ru-RU-SvetlanaNeural",
-    "compression_method": "rolling_summary",
     "voice_enabled": "true",
 }
 
@@ -535,3 +604,110 @@ def get_usage_by_model() -> list[dict]:
             ") t GROUP BY model ORDER BY total_input DESC",
         )
         return _fetchall(cur)
+
+
+# ── Chat Strategy Settings ──
+
+_STRATEGY_DEFAULTS = {
+    "rolling_summary_enabled": 1,
+    "rolling_summary_threshold_pct": 35,
+    "sliding_window_enabled": 0,
+    "sliding_window_size": 20,
+    "sticky_facts_enabled": 0,
+}
+
+_STRATEGY_FIELDS = set(_STRATEGY_DEFAULTS.keys())
+
+
+def get_strategy_settings(chat_id: str) -> dict:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT * FROM chat_strategy_settings WHERE chat_id={_P}",
+            (chat_id,),
+        )
+        row = _fetchone(cur)
+    if row:
+        return row
+    return {"chat_id": chat_id, **_STRATEGY_DEFAULTS}
+
+
+def update_strategy_settings(chat_id: str, **fields) -> dict:
+    sets = []
+    vals = []
+    for k, v in fields.items():
+        if k not in _STRATEGY_FIELDS:
+            continue
+        sets.append(f"{k}={_P}")
+        vals.append(int(v))
+    if not sets:
+        return get_strategy_settings(chat_id)
+    vals.append(chat_id)
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE chat_strategy_settings SET {', '.join(sets)} WHERE chat_id={_P}",
+            vals,
+        )
+        conn.commit()
+    return get_strategy_settings(chat_id)
+
+
+# ── Chat Facts ──
+
+def get_chat_facts(chat_id: str) -> list[dict]:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id, key, value, created_at, updated_at "
+            f"FROM chat_facts WHERE chat_id={_P} ORDER BY id",
+            (chat_id,),
+        )
+        return _fetchall(cur)
+
+
+def add_chat_fact(chat_id: str, key: str, value: str):
+    now = time.time()
+    if _PG:
+        sql = (
+            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at) "
+            f"VALUES ({_P},{_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id, key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at"
+        )
+    else:
+        sql = (
+            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at) "
+            f"VALUES ({_P},{_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
+        )
+    with _connect() as conn:
+        _execute(conn, sql, (chat_id, key, value, now, now))
+        conn.commit()
+
+
+def update_chat_fact(chat_id: str, key: str, value: str):
+    now = time.time()
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE chat_facts SET value={_P}, updated_at={_P} "
+            f"WHERE chat_id={_P} AND key={_P}",
+            (value, now, chat_id, key),
+        )
+        conn.commit()
+
+
+def delete_chat_fact_by_key(chat_id: str, key: str):
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"DELETE FROM chat_facts WHERE chat_id={_P} AND key={_P}",
+            (chat_id, key),
+        )
+        conn.commit()
+
+
+def delete_chat_fact_by_id(fact_id: int):
+    with _connect() as conn:
+        _execute(conn, f"DELETE FROM chat_facts WHERE id={_P}", (fact_id,))
+        conn.commit()

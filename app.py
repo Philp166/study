@@ -237,7 +237,7 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
-    allowed = {"tts_voice", "compression_method", "voice_enabled"}
+    allowed = {"tts_voice", "voice_enabled"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -258,6 +258,61 @@ async def api_voices():
 @app.get("/api/token-stats/by-model")
 def api_token_stats_by_model():
     return db.get_usage_by_model()
+
+
+# ── Strategy Settings per-chat ──
+
+_STRATEGY_RANGES = {
+    "rolling_summary_threshold_pct": (5, 90),
+    "sliding_window_size": (5, 100),
+}
+_STRATEGY_BOOLS = {"rolling_summary_enabled", "sliding_window_enabled", "sticky_facts_enabled"}
+_STRATEGY_EXCLUSIVE = {"rolling_summary_enabled", "sliding_window_enabled", "sticky_facts_enabled"}
+
+
+@app.get("/api/chats/{chat_id}/strategy-settings")
+def api_get_strategy_settings(chat_id: str):
+    return db.get_strategy_settings(chat_id)
+
+
+@app.patch("/api/chats/{chat_id}/strategy-settings")
+def api_update_strategy_settings(chat_id: str, updates: dict):
+    clean = {}
+    for k, v in updates.items():
+        if k in _STRATEGY_BOOLS:
+            clean[k] = 1 if v else 0
+        elif k in _STRATEGY_RANGES:
+            lo, hi = _STRATEGY_RANGES[k]
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                continue
+            if iv < lo or iv > hi:
+                continue
+            clean[k] = iv
+    if not clean:
+        return db.get_strategy_settings(chat_id)
+
+    # Mutual exclusivity: enabling one strategy disables the others
+    for key in _STRATEGY_EXCLUSIVE:
+        if clean.get(key) == 1:
+            for other in _STRATEGY_EXCLUSIVE:
+                if other != key:
+                    clean[other] = 0
+            break
+
+    return db.update_strategy_settings(chat_id, **clean)
+
+
+@app.get("/api/chats/{chat_id}/facts")
+def api_get_facts(chat_id: str):
+    return db.get_chat_facts(chat_id)
+
+
+@app.delete("/api/chats/{chat_id}/facts/{fact_id}")
+def api_delete_fact(chat_id: str, fact_id: int):
+    db.delete_chat_fact_by_id(fact_id)
+    return {"ok": True}
 
 
 @app.post("/api/migrate")
@@ -282,19 +337,14 @@ async def chat_stream(req: StreamRequest):
         return {"error": "chat not found"}
     model = req.model if req.model in ALLOWED_MODELS else chat.get("model", DEFAULT_MODEL)
 
-    all_msgs = db.get_messages_with_ids(req.chat_id)
-    summary_record = db.get_summary(req.chat_id)
+    last_msg = db.get_messages_with_ids(req.chat_id)
+    user_message = last_msg[-1]["content"] if last_msg and last_msg[-1]["role"] == "user" else None
 
-    recent, window_start_id = summarizer.get_recent_window(all_msgs)
-
-    summary_text = summarizer.maybe_summarize(
+    system_prompt, messages = summarizer.prepare_context(
         client, model, req.chat_id,
-        cos_agent.system_prompt, all_msgs, recent,
-        window_start_id, summary_record,
+        cos_agent.system_prompt,
+        user_message=user_message,
     )
-
-    system_prompt = summarizer.build_system_prompt(cos_agent.system_prompt, summary_text)
-    messages = [{"role": m["role"], "content": m["content"]} for m in recent]
 
     def generate():
         full_text = ""
@@ -353,18 +403,11 @@ async def voice_chat_stream(req: VoiceChatRequest):
     if req.chat_id:
         db.add_message(req.chat_id, "user", req.text)
 
-        all_msgs = db.get_messages_with_ids(req.chat_id)
-        summary_record = db.get_summary(req.chat_id)
-        recent, window_start_id = summarizer.get_recent_window(all_msgs)
-
-        summary_text = summarizer.maybe_summarize(
+        voice_system, messages = summarizer.prepare_context(
             client, VOICE_MODEL, req.chat_id,
-            voice_base, all_msgs, recent,
-            window_start_id, summary_record,
+            voice_base,
+            user_message=req.text,
         )
-
-        voice_system = summarizer.build_system_prompt(voice_base, summary_text)
-        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
     else:
         messages = [{"role": m.role, "content": m.content} for m in req.messages]
         messages.append({"role": "user", "content": req.text})

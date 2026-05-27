@@ -71,27 +71,6 @@
         </div>
       </section>
 
-      <!-- ── Context Compression ── -->
-      <section class="settings-card">
-        <h2 class="settings-card-title">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>
-          </svg>
-          Сжатие контекста
-        </h2>
-
-        <div class="settings-radio-group" id="compression-methods">
-          <label class="settings-radio">
-            <input type="radio" name="compression" value="rolling_summary" />
-            <span class="settings-radio-dot"></span>
-            <span class="settings-radio-label">
-              <span class="settings-radio-name">Rolling summary</span>
-              <span class="settings-radio-desc">Старые сообщения сжимаются через Haiku, свежие 10 остаются как есть</span>
-            </span>
-          </label>
-        </div>
-      </section>
-
       <!-- ── Token Usage ── -->
       <section class="settings-card">
         <h2 class="settings-card-title">
@@ -213,14 +192,6 @@
         api("PATCH", "/api/settings", { tts_voice: ttsSelect.value });
       });
 
-      // Compression method
-      const radios = document.querySelectorAll('input[name="compression"]');
-      for (const r of radios) {
-        r.checked = r.value === settings.compression_method;
-        r.addEventListener("change", () => {
-          if (r.checked) api("PATCH", "/api/settings", { compression_method: r.value });
-        });
-      }
     }
 
     /* ── Token Usage ── */
