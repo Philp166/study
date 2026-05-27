@@ -32,8 +32,13 @@ class TokenUsage:
 
     @property
     def effective_input(self) -> int:
-        """Входные токены, реально обработанные (без прочитанных из кэша)."""
-        return self.input_tokens - self.cache_read_input_tokens
+        """Токены, реально обработанные (без кэша).
+
+        Sonnet возвращает input_tokens уже без кэшированных,
+        поэтому если cache_read > input — берём input как есть.
+        """
+        diff = self.input_tokens - self.cache_read_input_tokens
+        return diff if diff >= 0 else self.input_tokens
 
 
 @dataclass

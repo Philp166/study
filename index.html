@@ -606,7 +606,8 @@
       document.getElementById("td-req-output").textContent = fmtNum(req.output_tokens);
       document.getElementById("td-req-cache-write").textContent = fmtNum(req.cache_creation_input_tokens);
       document.getElementById("td-req-cache-read").textContent = fmtNum(cacheRead);
-      document.getElementById("td-req-effective").textContent = fmtNum(req.input_tokens - cacheRead);
+      const rawEff = req.input_tokens - cacheRead;
+      document.getElementById("td-req-effective").textContent = fmtNum(rawEff >= 0 ? rawEff : req.input_tokens);
 
       if (cum) {
         document.getElementById("td-cum-input").textContent = fmtNum(cum.total_input);
