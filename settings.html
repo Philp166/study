@@ -185,8 +185,19 @@
 
       // Voice enabled
       voiceEnabledCb.checked = settings.voice_enabled !== "false";
+      function syncWakeWordState() {
+        const off = !voiceEnabledCb.checked;
+        wwEnabledCb.disabled = off;
+        wwPhraseInput.disabled = off;
+        if (off) {
+          wwEnabledCb.checked = false;
+          localStorage.setItem("cos_wakeword_enabled", "false");
+        }
+      }
+      syncWakeWordState();
       voiceEnabledCb.addEventListener("change", () => {
         api("PATCH", "/api/settings", { voice_enabled: voiceEnabledCb.checked ? "true" : "false" });
+        syncWakeWordState();
       });
 
       // TTS voice dropdown

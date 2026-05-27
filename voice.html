@@ -302,7 +302,15 @@
       let finalTranscript = "";
       let silenceTimer = null;
 
-      const EXIT_PHRASE = "завершить чат";
+      const EXIT_PHRASES = [
+        "завершить чат", "завершите чат", "завершим чат", "завершаем чат",
+        "закончить чат", "закончите чат", "закончим чат",
+        "прекратить чат", "прекратите чат", "прекратим чат",
+        "останови чат", "остановить чат", "остановите чат",
+        "выйти из чата", "выход из чата",
+        "конец чата", "чат окончен",
+        "хватит чат",
+      ];
 
       rec.onresult = (e) => {
         if (busy) return;
@@ -322,7 +330,7 @@
         liveTextEl.textContent = finalTranscript + interim;
 
         const combined = (finalTranscript + interim).toLowerCase().replace(/[.,!?;:]/g, '').trim();
-        if (combined.includes(EXIT_PHRASE)) {
+        if (EXIT_PHRASES.some(p => combined.includes(p))) {
           clearTimeout(silenceTimer);
           rec.stop();
           liveTextEl.textContent = "";
