@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CoS — Настройки</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="settings-page">
+  <div class="crt-overlay"></div>
+  <div class="vignette"></div>
+
+  <div class="settings-header">
+    <div class="runline top"></div>
+    <a href="/" class="back-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+      </svg>
+      Текстовый чат
+    </a>
+    <span class="header-title">
+      <span class="glitch flicker" data-text="НАСТРОЙКИ">НАСТРОЙКИ</span>
+      <span class="mono" style="font-size:10px;color:var(--ink-2);margin-left:8px">// SETTINGS</span>
+    </span>
+    <div style="width:100px"></div>
+  </div>
+
+  <div class="settings-scroll">
+    <div class="settings-container">
+
+      <!-- ── Voice & Activation ── -->
+      <section class="settings-card">
+        <h2 class="settings-card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>
+          Голос и активация
+        </h2>
+
+        <div class="settings-row">
+          <div class="settings-label">Голосовой чат</div>
+          <div class="settings-control">
+            <label class="wakeword-switch">
+              <input type="checkbox" id="voice-enabled" />
+              <span class="wakeword-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <div class="settings-label">Кодовое слово</div>
+          <div class="settings-control">
+            <label class="wakeword-switch" style="margin-right:10px">
+              <input type="checkbox" id="ww-enabled" />
+              <span class="wakeword-slider"></span>
+            </label>
+            <input type="text" class="settings-input" id="ww-phrase" placeholder="привет штаб" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <div class="settings-label">TTS голос</div>
+          <div class="settings-control">
+            <select class="settings-select" id="tts-voice">
+              <option value="">Загрузка...</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Context Compression ── -->
+      <section class="settings-card">
+        <h2 class="settings-card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+          Сжатие контекста
+        </h2>
+
+        <div class="settings-radio-group" id="compression-methods">
+          <label class="settings-radio">
+            <input type="radio" name="compression" value="rolling_summary" />
+            <span class="settings-radio-dot"></span>
+            <span class="settings-radio-label">
+              <span class="settings-radio-name">Rolling summary</span>
+              <span class="settings-radio-desc">Старые сообщения сжимаются через Haiku, свежие 10 остаются как есть</span>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <!-- ── Token Usage ── -->
+      <section class="settings-card">
+        <h2 class="settings-card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+          </svg>
+          Расход токенов
+        </h2>
+
+        <div class="usage-global" id="usage-global">
+          <div class="usage-total-grid">
+            <div class="usage-stat">
+              <span class="usage-stat-val" id="ug-requests">--</span>
+              <span class="usage-stat-label">Запросов</span>
+            </div>
+            <div class="usage-stat">
+              <span class="usage-stat-val" id="ug-input">--</span>
+              <span class="usage-stat-label">Входных</span>
+            </div>
+            <div class="usage-stat">
+              <span class="usage-stat-val" id="ug-output">--</span>
+              <span class="usage-stat-label">Выходных</span>
+            </div>
+            <div class="usage-stat">
+              <span class="usage-stat-val" id="ug-cache-write">--</span>
+              <span class="usage-stat-label">Кэш запись</span>
+            </div>
+            <div class="usage-stat">
+              <span class="usage-stat-val" id="ug-cache-read">--</span>
+              <span class="usage-stat-label">Кэш чтение</span>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="settings-subtitle">По моделям</h3>
+        <div class="usage-by-model" id="usage-by-model">
+          <div class="usage-loading">Загрузка...</div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script>
+    const API = "";
+
+    async function api(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      return res.json();
+    }
+
+    function fmtNum(n) {
+      if (n == null) return "--";
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+      if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+      return String(n);
+    }
+
+    /* ── Voice & Activation ── */
+
+    const voiceEnabledCb = document.getElementById("voice-enabled");
+    const wwEnabledCb = document.getElementById("ww-enabled");
+    const wwPhraseInput = document.getElementById("ww-phrase");
+    const ttsSelect = document.getElementById("tts-voice");
+
+    // Wake word — localStorage
+    wwEnabledCb.checked = localStorage.getItem("cos_wakeword_enabled") === "true";
+    wwPhraseInput.value = localStorage.getItem("cos_wakeword_phrase") || "привет штаб";
+
+    wwEnabledCb.addEventListener("change", () => {
+      localStorage.setItem("cos_wakeword_enabled", String(wwEnabledCb.checked));
+    });
+
+    let wwDebounce;
+    wwPhraseInput.addEventListener("input", () => {
+      clearTimeout(wwDebounce);
+      wwDebounce = setTimeout(() => {
+        const val = wwPhraseInput.value.trim();
+        if (val) localStorage.setItem("cos_wakeword_phrase", val);
+      }, 500);
+    });
+
+    // TTS voices + server settings
+    async function loadSettings() {
+      const [settings, voices] = await Promise.all([
+        api("GET", "/api/settings"),
+        api("GET", "/api/voices"),
+      ]);
+
+      // Voice enabled
+      voiceEnabledCb.checked = settings.voice_enabled !== "false";
+      voiceEnabledCb.addEventListener("change", () => {
+        api("PATCH", "/api/settings", { voice_enabled: voiceEnabledCb.checked ? "true" : "false" });
+      });
+
+      // TTS voice dropdown
+      ttsSelect.innerHTML = "";
+      for (const v of voices) {
+        const opt = document.createElement("option");
+        opt.value = v.id;
+        opt.textContent = v.name + (v.gender === "Female" ? " (Ж)" : " (М)");
+        ttsSelect.appendChild(opt);
+      }
+      ttsSelect.value = settings.tts_voice || "ru-RU-SvetlanaNeural";
+      ttsSelect.addEventListener("change", () => {
+        api("PATCH", "/api/settings", { tts_voice: ttsSelect.value });
+      });
+
+      // Compression method
+      const radios = document.querySelectorAll('input[name="compression"]');
+      for (const r of radios) {
+        r.checked = r.value === settings.compression_method;
+        r.addEventListener("change", () => {
+          if (r.checked) api("PATCH", "/api/settings", { compression_method: r.value });
+        });
+      }
+    }
+
+    /* ── Token Usage ── */
+
+    async function loadUsage() {
+      const [global, byModel] = await Promise.all([
+        api("GET", "/api/token-stats"),
+        api("GET", "/api/token-stats/by-model"),
+      ]);
+
+      const g = global.all_time || {};
+      document.getElementById("ug-requests").textContent = fmtNum(g.request_count);
+      document.getElementById("ug-input").textContent = fmtNum(g.total_input);
+      document.getElementById("ug-output").textContent = fmtNum(g.total_output);
+      document.getElementById("ug-cache-write").textContent = fmtNum(g.total_cache_creation);
+      document.getElementById("ug-cache-read").textContent = fmtNum(g.total_cache_read);
+
+      const container = document.getElementById("usage-by-model");
+      if (!byModel || byModel.length === 0) {
+        container.innerHTML = '<div class="usage-empty">Нет данных</div>';
+        return;
+      }
+
+      let html = '<table class="usage-table"><thead><tr>' +
+        '<th>Модель</th><th>Запросы</th><th>Вход</th><th>Выход</th><th>Кэш R</th><th>Кэш W</th>' +
+        '</tr></thead><tbody>';
+      for (const m of byModel) {
+        html += '<tr>' +
+          '<td class="model-name">' + m.model + '</td>' +
+          '<td>' + fmtNum(m.request_count) + '</td>' +
+          '<td>' + fmtNum(m.total_input) + '</td>' +
+          '<td>' + fmtNum(m.total_output) + '</td>' +
+          '<td>' + fmtNum(m.total_cache_read) + '</td>' +
+          '<td>' + fmtNum(m.total_cache_creation) + '</td>' +
+          '</tr>';
+      }
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    /* ── Init ── */
+    loadSettings();
+    loadUsage();
+  </script>
+</body>
+</html>

@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS summaries (
     created_at               DOUBLE PRECISION NOT NULL,
     covers_messages_up_to_id INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_archive (
+    model                 TEXT NOT NULL,
+    request_count         INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _SCHEMA_SQLITE = """
@@ -145,6 +159,20 @@ CREATE TABLE IF NOT EXISTS summaries (
     summary_text             TEXT NOT NULL,
     created_at               REAL NOT NULL,
     covers_messages_up_to_id INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS usage_archive (
+    model                 TEXT NOT NULL,
+    request_count         INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -230,8 +258,61 @@ def update_chat(chat_id: str, **fields):
 
 def delete_chat(chat_id: str):
     with _connect() as conn:
+        _archive_usage(conn, chat_id)
         _execute(conn, f"DELETE FROM chats WHERE id={_P}", (chat_id,))
         conn.commit()
+
+
+def _archive_usage(conn, chat_id: str):
+    """Переносит расход удаляемого чата в usage_archive (по моделям)."""
+    cur = _execute(
+        conn,
+        "SELECT model, "
+        "  COUNT(*) AS cnt, "
+        "  COALESCE(SUM(input_tokens), 0)  AS inp, "
+        "  COALESCE(SUM(output_tokens), 0) AS out, "
+        "  COALESCE(SUM(cache_creation_tokens), 0) AS cw, "
+        "  COALESCE(SUM(cache_read_tokens), 0)     AS cr "
+        f"FROM token_usage WHERE chat_id={_P} GROUP BY model",
+        (chat_id,),
+    )
+    rows = _fetchall(cur)
+    for r in rows:
+        if _PG:
+            sql = (
+                f"INSERT INTO usage_archive (model, request_count, input_tokens, output_tokens, "
+                f"cache_creation_tokens, cache_read_tokens) VALUES ({_P},{_P},{_P},{_P},{_P},{_P}) "
+                f"ON CONFLICT DO NOTHING"
+            )
+            _execute(conn, sql, (r["model"], r["cnt"], r["inp"], r["out"], r["cw"], r["cr"]))
+            _execute(
+                conn,
+                f"UPDATE usage_archive SET "
+                f"request_count=request_count+{_P}, input_tokens=input_tokens+{_P}, "
+                f"output_tokens=output_tokens+{_P}, cache_creation_tokens=cache_creation_tokens+{_P}, "
+                f"cache_read_tokens=cache_read_tokens+{_P} WHERE model={_P}",
+                (r["cnt"], r["inp"], r["out"], r["cw"], r["cr"], r["model"]),
+            )
+        else:
+            existing = _execute(
+                conn, f"SELECT rowid FROM usage_archive WHERE model={_P}", (r["model"],)
+            )
+            if _fetchone(existing):
+                _execute(
+                    conn,
+                    f"UPDATE usage_archive SET "
+                    f"request_count=request_count+{_P}, input_tokens=input_tokens+{_P}, "
+                    f"output_tokens=output_tokens+{_P}, cache_creation_tokens=cache_creation_tokens+{_P}, "
+                    f"cache_read_tokens=cache_read_tokens+{_P} WHERE model={_P}",
+                    (r["cnt"], r["inp"], r["out"], r["cw"], r["cr"], r["model"]),
+                )
+            else:
+                _execute(
+                    conn,
+                    f"INSERT INTO usage_archive (model, request_count, input_tokens, output_tokens, "
+                    f"cache_creation_tokens, cache_read_tokens) VALUES ({_P},{_P},{_P},{_P},{_P},{_P})",
+                    (r["model"], r["cnt"], r["inp"], r["out"], r["cw"], r["cr"]),
+                )
 
 
 # ── Messages ──
@@ -341,12 +422,22 @@ def get_global_usage() -> dict:
         cur = _execute(
             conn,
             "SELECT "
-            "  COUNT(*) AS request_count, "
+            "  COALESCE(SUM(request_count), 0) AS request_count, "
             "  COALESCE(SUM(input_tokens), 0)  AS total_input, "
             "  COALESCE(SUM(output_tokens), 0) AS total_output, "
             "  COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation, "
             "  COALESCE(SUM(cache_read_tokens), 0)     AS total_cache_read "
-            "FROM token_usage",
+            "FROM ("
+            "  SELECT COUNT(*) AS request_count, "
+            "    SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
+            "    SUM(cache_creation_tokens) AS cache_creation_tokens, "
+            "    SUM(cache_read_tokens) AS cache_read_tokens "
+            "  FROM token_usage "
+            "  UNION ALL "
+            "  SELECT SUM(request_count), SUM(input_tokens), SUM(output_tokens), "
+            "    SUM(cache_creation_tokens), SUM(cache_read_tokens) "
+            "  FROM usage_archive"
+            ") t",
         )
         return _fetchone(cur) or {
             "request_count": 0, "total_input": 0, "total_output": 0,
@@ -377,3 +468,70 @@ def import_chat(chat_id: str, title: str, pinned: bool, model: str,
                 (chat_id, m["role"], m["content"], updated_at),
             )
         conn.commit()
+
+
+# ── Settings (key-value) ──
+
+_SETTING_DEFAULTS = {
+    "tts_voice": "ru-RU-SvetlanaNeural",
+    "compression_method": "rolling_summary",
+    "voice_enabled": "true",
+}
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    fallback = default if default is not None else _SETTING_DEFAULTS.get(key)
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT value FROM settings WHERE key={_P}", (key,))
+        row = _fetchone(cur)
+        return row["value"] if row else fallback
+
+
+def get_all_settings() -> dict:
+    with _connect() as conn:
+        cur = _execute(conn, "SELECT key, value FROM settings")
+        rows = _fetchall(cur)
+    result = dict(_SETTING_DEFAULTS)
+    for r in rows:
+        result[r["key"]] = r["value"]
+    return result
+
+
+def set_setting(key: str, value: str):
+    if _PG:
+        sql = (
+            f"INSERT INTO settings (key, value) VALUES ({_P},{_P}) "
+            f"ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
+        )
+    else:
+        sql = f"INSERT OR REPLACE INTO settings (key, value) VALUES ({_P},{_P})"
+    with _connect() as conn:
+        _execute(conn, sql, (key, value))
+        conn.commit()
+
+
+# ── Token usage by model ──
+
+def get_usage_by_model() -> list[dict]:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            "SELECT model, "
+            "  SUM(request_count) AS request_count, "
+            "  SUM(input_tokens)  AS total_input, "
+            "  SUM(output_tokens) AS total_output, "
+            "  SUM(cache_creation_tokens) AS total_cache_creation, "
+            "  SUM(cache_read_tokens)     AS total_cache_read "
+            "FROM ("
+            "  SELECT model, COUNT(*) AS request_count, "
+            "    SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
+            "    SUM(cache_creation_tokens) AS cache_creation_tokens, "
+            "    SUM(cache_read_tokens) AS cache_read_tokens "
+            "  FROM token_usage GROUP BY model "
+            "  UNION ALL "
+            "  SELECT model, request_count, input_tokens, output_tokens, "
+            "    cache_creation_tokens, cache_read_tokens "
+            "  FROM usage_archive"
+            ") t GROUP BY model ORDER BY total_input DESC",
+        )
+        return _fetchall(cur)

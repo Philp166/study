@@ -14,7 +14,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 import edge_tts
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 import anthropic
@@ -59,7 +59,7 @@ ALLOWED_MODELS = {
 }
 DEFAULT_MODEL = "claude-opus-4-6"
 
-TTS_VOICE = "ru-RU-SvetlanaNeural"
+TTS_VOICE_DEFAULT = "ru-RU-SvetlanaNeural"
 VOICE_MODEL = "claude-haiku-4-5"
 VOICE_MAX_TOKENS = 500
 
@@ -102,7 +102,8 @@ async def tts_text(text: str) -> str:
         clean = strip_markdown(text)
         if not clean.strip():
             return ""
-        communicate = edge_tts.Communicate(clean, TTS_VOICE)
+        voice = db.get_setting("tts_voice", TTS_VOICE_DEFAULT)
+        communicate = edge_tts.Communicate(clean, voice)
         buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -229,6 +230,36 @@ def api_chat_usage(chat_id: str):
     return db.get_chat_usage(chat_id)
 
 
+@app.get("/api/settings")
+def api_get_settings():
+    return db.get_all_settings()
+
+
+@app.patch("/api/settings")
+def api_update_settings(updates: dict):
+    allowed = {"tts_voice", "compression_method", "voice_enabled"}
+    for key, value in updates.items():
+        if key in allowed:
+            db.set_setting(key, str(value))
+    return db.get_all_settings()
+
+
+@app.get("/api/voices")
+async def api_voices():
+    voices = await edge_tts.list_voices()
+    ru_voices = [
+        {"id": v["ShortName"], "name": v["FriendlyName"], "gender": v["Gender"]}
+        for v in voices
+        if v["Locale"].startswith("ru")
+    ]
+    return ru_voices
+
+
+@app.get("/api/token-stats/by-model")
+def api_token_stats_by_model():
+    return db.get_usage_by_model()
+
+
 @app.post("/api/migrate")
 def api_migrate(req: MigrateRequest):
     for c in req.chats:
@@ -304,7 +335,14 @@ def serve_agent_js():
 
 @app.get("/voice")
 def voice_page():
+    if db.get_setting("voice_enabled", "true") == "false":
+        return RedirectResponse("/")
     return FileResponse(BASE_DIR / "voice.html")
+
+
+@app.get("/settings")
+def settings_page():
+    return FileResponse(BASE_DIR / "settings.html")
 
 
 @app.post("/voice/chat/stream")

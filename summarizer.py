@@ -120,6 +120,10 @@ def maybe_summarize(
     """
     import db
 
+    method = db.get_setting("compression_method", "rolling_summary")
+    if method != "rolling_summary":
+        return summary_record["summary_text"] if summary_record else None
+
     summary_text = summary_record["summary_text"] if summary_record else None
     full_system = build_system_prompt(system_prompt, summary_text)
 
