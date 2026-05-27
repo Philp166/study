@@ -301,6 +301,8 @@
       let finalTranscript = "";
       let silenceTimer = null;
 
+      const EXIT_PHRASE = "завершить чат";
+
       rec.onresult = (e) => {
         if (busy) return;
 
@@ -317,6 +319,16 @@
         }
 
         liveTextEl.textContent = finalTranscript + interim;
+
+        const combined = (finalTranscript + interim).toLowerCase().replace(/[.,!?;:]/g, '').trim();
+        if (combined.includes(EXIT_PHRASE)) {
+          clearTimeout(silenceTimer);
+          rec.stop();
+          liveTextEl.textContent = "";
+          stopSession();
+          window.location.href = "/";
+          return;
+        }
 
         clearTimeout(silenceTimer);
         if (finalTranscript.trim()) {
@@ -540,7 +552,7 @@
       if (params.get("wakeword") === "1") {
         history.replaceState(null, "", "/voice");
         unlockAudio();
-        if (hasSpeech) startSession();
+        sessionActive = true;
         await processVoice("Привет");
       }
     })();
