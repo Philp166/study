@@ -7,6 +7,10 @@ import re
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / ".env", override=True)
+
 import edge_tts
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,10 +21,6 @@ import anthropic
 
 from agent import Agent
 import db
-
-BASE_DIR = Path(__file__).parent
-
-load_dotenv(BASE_DIR / ".env", override=True)
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     raise SystemExit("Открой файл .env и вставь свой ключ в строку ANTHROPIC_API_KEY=")
