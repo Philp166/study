@@ -86,6 +86,7 @@
 
     const API = "";
     const VOICE_CHAT_TITLE = "__voice__";
+    const _isWakewordActivation = new URLSearchParams(window.location.search).get("wakeword") === "1";
 
     const transcriptEl = document.getElementById("transcript");
     const statusEl = document.getElementById("status");
@@ -627,9 +628,10 @@
       updateWakeWordUI();
     }
 
-    // Stop wake word when voice session starts, restart when it ends
+    // Stop wake word when voice session starts/resumes, restart when it ends
     const _origStart = startSession;
     const _origStop = stopSession;
+    const _origResume = resumeListening;
     startSession = function() {
       if (wakeWord) wakeWord.stop();
       _origStart();
@@ -638,9 +640,13 @@
       _origStop();
       if (wakeWord && wakeWord.isEnabled()) wakeWord.start();
     };
+    resumeListening = function() {
+      if (wakeWord) wakeWord.stop();
+      _origResume();
+    };
 
-    // Auto-start wake word if enabled
-    if (wakeWord && wakeWord.isEnabled()) wakeWord.start();
+    // Auto-start wake word if enabled (skip if wakeword just activated — session will handle it)
+    if (wakeWord && wakeWord.isEnabled() && !_isWakewordActivation) wakeWord.start();
     updateWakeWordUI();
   </script>
 </body>
