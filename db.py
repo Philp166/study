@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS token_usage (
     ts                    DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_chat ON token_usage(chat_id);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    chat_id                  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    summary_text             TEXT NOT NULL,
+    created_at               DOUBLE PRECISION NOT NULL,
+    covers_messages_up_to_id INTEGER NOT NULL
+);
 """
 
 _SCHEMA_SQLITE = """
@@ -132,6 +139,13 @@ CREATE TABLE IF NOT EXISTS token_usage (
     ts                    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_chat ON token_usage(chat_id);
+
+CREATE TABLE IF NOT EXISTS summaries (
+    chat_id                  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+    summary_text             TEXT NOT NULL,
+    created_at               REAL NOT NULL,
+    covers_messages_up_to_id INTEGER NOT NULL
+);
 """
 
 
@@ -242,6 +256,49 @@ def get_messages(chat_id: str):
             (chat_id,),
         )
         return _fetchall(cur)
+
+
+def get_messages_with_ids(chat_id: str) -> list[dict]:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id, role, content FROM messages WHERE chat_id={_P} ORDER BY id",
+            (chat_id,),
+        )
+        return _fetchall(cur)
+
+
+# ── Summaries ──
+
+def get_summary(chat_id: str) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT summary_text, covers_messages_up_to_id FROM summaries WHERE chat_id={_P}",
+            (chat_id,),
+        )
+        return _fetchone(cur)
+
+
+def save_summary(chat_id: str, summary_text: str, covers_up_to_id: int):
+    now = time.time()
+    if _PG:
+        sql = (
+            f"INSERT INTO summaries (chat_id, summary_text, created_at, covers_messages_up_to_id) "
+            f"VALUES ({_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id) DO UPDATE SET "
+            f"summary_text=EXCLUDED.summary_text, created_at=EXCLUDED.created_at, "
+            f"covers_messages_up_to_id=EXCLUDED.covers_messages_up_to_id"
+        )
+    else:
+        sql = (
+            f"INSERT OR REPLACE INTO summaries "
+            f"(chat_id, summary_text, created_at, covers_messages_up_to_id) "
+            f"VALUES ({_P},{_P},{_P},{_P})"
+        )
+    with _connect() as conn:
+        _execute(conn, sql, (chat_id, summary_text, now, covers_up_to_id))
+        conn.commit()
 
 
 # ── Token usage ──

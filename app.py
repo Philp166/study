@@ -21,6 +21,7 @@ import anthropic
 
 from agent import Agent
 import db
+import summarizer
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     raise SystemExit("Открой файл .env и вставь свой ключ в строку ANTHROPIC_API_KEY=")
@@ -249,12 +250,25 @@ async def chat_stream(req: StreamRequest):
     if not chat:
         return {"error": "chat not found"}
     model = req.model if req.model in ALLOWED_MODELS else chat.get("model", DEFAULT_MODEL)
-    messages = chat["messages"]
+
+    all_msgs = db.get_messages_with_ids(req.chat_id)
+    summary_record = db.get_summary(req.chat_id)
+
+    recent, window_start_id = summarizer.get_recent_window(all_msgs)
+
+    summary_text = summarizer.maybe_summarize(
+        client, model, req.chat_id,
+        cos_agent.system_prompt, all_msgs, recent,
+        window_start_id, summary_record,
+    )
+
+    system_prompt = summarizer.build_system_prompt(cos_agent.system_prompt, summary_text)
+    messages = [{"role": m["role"], "content": m["content"]} for m in recent]
 
     def generate():
         full_text = ""
         try:
-            for chunk in cos_agent.respond_stream(messages, model=model):
+            for chunk in cos_agent.respond_stream(messages, model=model, system_prompt=system_prompt):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
             db.add_message(req.chat_id, "assistant", full_text)
@@ -296,17 +310,27 @@ def voice_page():
 @app.post("/voice/chat/stream")
 async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
-    voice_system = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
-
-    if req.chat_id:
-        chat = db.get_chat(req.chat_id)
-        messages = chat["messages"] if chat else []
-    else:
-        messages = [{"role": m.role, "content": m.content} for m in req.messages]
-    messages.append({"role": "user", "content": req.text})
+    voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
 
     if req.chat_id:
         db.add_message(req.chat_id, "user", req.text)
+
+        all_msgs = db.get_messages_with_ids(req.chat_id)
+        summary_record = db.get_summary(req.chat_id)
+        recent, window_start_id = summarizer.get_recent_window(all_msgs)
+
+        summary_text = summarizer.maybe_summarize(
+            client, VOICE_MODEL, req.chat_id,
+            voice_base, all_msgs, recent,
+            window_start_id, summary_record,
+        )
+
+        voice_system = summarizer.build_system_prompt(voice_base, summary_text)
+        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+    else:
+        messages = [{"role": m.role, "content": m.content} for m in req.messages]
+        messages.append({"role": "user", "content": req.text})
+        voice_system = voice_base
 
     async def generate():
         text_queue: asyncio.Queue = asyncio.Queue()
