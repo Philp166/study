@@ -67,6 +67,16 @@
           </div>
         </div>
         <div class="token-details-section">
+          <h4>За чат (БД)</h4>
+          <div class="token-row"><span>Входные</span><span class="val" id="td-db-input">0</span></div>
+          <div class="token-row"><span>Выходные</span><span class="val" id="td-db-output">0</span></div>
+          <div class="token-row"><span>Кэш запись</span><span class="val" id="td-db-cache-write">0</span></div>
+          <div class="token-row"><span>Кэш чтение</span><span class="val" id="td-db-cache-read">0</span></div>
+          <div class="token-row" style="margin-top:4px;border-top:1px solid var(--line);padding-top:4px">
+            <span>Запросов</span><span class="val" id="td-db-count">0</span>
+          </div>
+        </div>
+        <div class="token-details-section">
           <h4>Контекстное окно</h4>
           <div class="token-row"><span>Модель</span><span class="val" id="td-ctx-model">—</span></div>
           <div class="token-row"><span>Окно</span><span class="val" id="td-ctx-window">—</span></div>
@@ -244,6 +254,20 @@
     async function loadCurrentChat() {
       const data = await api("GET", `/api/chats/${currentId}`);
       currentMessages = data.messages || [];
+      // Подгрузить сохранённую статистику токенов из БД
+      try {
+        const usage = await api("GET", `/api/chats/${currentId}/usage`);
+        if (usage && usage.request_count > 0) {
+          document.getElementById("td-db-input").textContent = fmtNum(usage.total_input);
+          document.getElementById("td-db-output").textContent = fmtNum(usage.total_output);
+          document.getElementById("td-db-cache-write").textContent = fmtNum(usage.total_cache_creation);
+          document.getElementById("td-db-cache-read").textContent = fmtNum(usage.total_cache_read);
+          document.getElementById("td-db-count").textContent = usage.request_count;
+        } else {
+          for (const id of ["td-db-input","td-db-output","td-db-cache-write","td-db-cache-read"]) document.getElementById(id).textContent = "0";
+          document.getElementById("td-db-count").textContent = "0";
+        }
+      } catch {}
     }
 
     function currentChatMeta() { return chatsList.find(c => c.id === currentId); }
@@ -615,6 +639,14 @@
         document.getElementById("td-cum-cache-write").textContent = fmtNum(cum.total_cache_creation);
         document.getElementById("td-cum-cache-read").textContent = fmtNum(cum.total_cache_read);
         document.getElementById("td-cum-count").textContent = cum.request_count;
+      }
+      const db = data.chat_totals;
+      if (db) {
+        document.getElementById("td-db-input").textContent = fmtNum(db.total_input);
+        document.getElementById("td-db-output").textContent = fmtNum(db.total_output);
+        document.getElementById("td-db-cache-write").textContent = fmtNum(db.total_cache_creation);
+        document.getElementById("td-db-cache-read").textContent = fmtNum(db.total_cache_read);
+        document.getElementById("td-db-count").textContent = db.request_count;
       }
       if (ctx) {
         document.getElementById("td-ctx-model").textContent = ctx.model;

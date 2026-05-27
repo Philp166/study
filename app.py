@@ -219,7 +219,13 @@ def api_token_stats():
     return {
         **cos_agent.token_stats.to_dict(),
         "context": cos_agent.get_context_pressure(),
+        "all_time": db.get_global_usage(),
     }
+
+
+@app.get("/api/chats/{chat_id}/usage")
+def api_chat_usage(chat_id: str):
+    return db.get_chat_usage(chat_id)
 
 
 @app.post("/api/migrate")
@@ -252,10 +258,17 @@ async def chat_stream(req: StreamRequest):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
             db.add_message(req.chat_id, "assistant", full_text)
+            u = cos_agent.token_stats.last_usage
+            db.save_usage(
+                req.chat_id, model,
+                u.input_tokens, u.output_tokens,
+                u.cache_creation_input_tokens, u.cache_read_input_tokens,
+            )
             usage_data = {
                 "type": "usage",
                 **cos_agent.token_stats.to_dict(),
                 "context": cos_agent.get_context_pressure(model),
+                "chat_totals": db.get_chat_usage(req.chat_id),
             }
             yield f"data: {json.dumps(usage_data)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -335,10 +348,17 @@ async def voice_chat_stream(req: VoiceChatRequest):
                         yield f"data: {json.dumps({'type': 'audio', 'data': audio})}\n\n"
                 if req.chat_id and full_text:
                     db.add_message(req.chat_id, "assistant", full_text)
+                    u = cos_agent.token_stats.last_usage
+                    db.save_usage(
+                        req.chat_id, VOICE_MODEL,
+                        u.input_tokens, u.output_tokens,
+                        u.cache_creation_input_tokens, u.cache_read_input_tokens,
+                    )
                 usage_data = {
                     "type": "usage",
                     **cos_agent.token_stats.to_dict(),
                     "context": cos_agent.get_context_pressure(VOICE_MODEL),
+                    "chat_totals": db.get_chat_usage(req.chat_id) if req.chat_id else None,
                 }
                 yield f"data: {json.dumps(usage_data)}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'full_text': full_text})}\n\n"

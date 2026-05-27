@@ -31,6 +31,18 @@ def init_db():
             ts      REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id);
+
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id               TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            model                 TEXT NOT NULL,
+            input_tokens          INTEGER NOT NULL DEFAULT 0,
+            output_tokens         INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+            ts                    REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_usage_chat ON token_usage(chat_id);
     """)
     conn.close()
 
@@ -118,6 +130,51 @@ def get_messages(chat_id: str):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def save_usage(chat_id: str, model: str, input_tokens: int, output_tokens: int,
+               cache_creation: int = 0, cache_read: int = 0):
+    now = time.time()
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO token_usage "
+        "(chat_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, ts) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (chat_id, model, input_tokens, output_tokens, cache_creation, cache_read, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_usage(chat_id: str) -> dict:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT "
+        "  COUNT(*) AS request_count, "
+        "  COALESCE(SUM(input_tokens), 0)  AS total_input, "
+        "  COALESCE(SUM(output_tokens), 0) AS total_output, "
+        "  COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation, "
+        "  COALESCE(SUM(cache_read_tokens), 0)     AS total_cache_read "
+        "FROM token_usage WHERE chat_id=?",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_global_usage() -> dict:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT "
+        "  COUNT(*) AS request_count, "
+        "  COALESCE(SUM(input_tokens), 0)  AS total_input, "
+        "  COALESCE(SUM(output_tokens), 0) AS total_output, "
+        "  COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation, "
+        "  COALESCE(SUM(cache_read_tokens), 0)     AS total_cache_read "
+        "FROM token_usage",
+    ).fetchone()
+    conn.close()
+    return dict(row)
+
 
 def import_chat(chat_id: str, title: str, pinned: bool, model: str,
                 created_at: float, updated_at: float, messages: list[dict]):
