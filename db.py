@@ -3,6 +3,10 @@
 
 DATABASE_URL задана → PostgreSQL (Render, прод).
 Не задана             → SQLite   (локальная разработка).
+
+История чата — дерево: каждое сообщение знает родителя (parent_message_id).
+Активная ветка чата — путь от chats.current_leaf_message_id вверх до корня.
+Линейный чат — вырожденное дерево, где у каждого сообщения один ребёнок.
 """
 
 import os
@@ -21,10 +25,16 @@ else:
     import sqlite3
     _PG = False
 
-DB_PATH = Path(__file__).parent / "cos.db"
+DB_PATH = Path(os.getenv("COS_DB_PATH") or (Path(__file__).parent / "cos.db"))
 
 # Плейсхолдер параметра: %s для PostgreSQL, ? для SQLite
 _P = "%s" if _PG else "?"
+
+# Глубина рекурсивного подъёма по дереву (защита от циклов/переполнения).
+MAX_BRANCH_DEPTH = 1000
+
+# Значение-надгробие: факт «удалён» в этой ветке, не затрагивая предков/сиблингов.
+FACT_TOMBSTONE = "\x00__deleted__"
 
 
 @contextmanager
@@ -47,12 +57,8 @@ def _connect():
 
 
 def _fetchone(cur) -> dict | None:
-    if _PG:
-        row = cur.fetchone()
-        return dict(row) if row else None
-    else:
-        row = cur.fetchone()
-        return dict(row) if row else None
+    row = cur.fetchone()
+    return dict(row) if row else None
 
 
 def _fetchall(cur) -> list[dict]:
@@ -68,7 +74,23 @@ def _execute(conn, sql, params=()):
         return conn.execute(sql, params)
 
 
-# ── Schema ──
+def _insert_message(conn, chat_id: str, role: str, content: str, ts: float,
+                    parent_message_id: int | None) -> int:
+    """Вставляет сообщение, возвращает его id (кросс-СУБД)."""
+    sql = (
+        f"INSERT INTO messages (chat_id, role, content, ts, parent_message_id) "
+        f"VALUES ({_P},{_P},{_P},{_P},{_P})"
+    )
+    if _PG:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql + " RETURNING id", (chat_id, role, content, ts, parent_message_id))
+        return cur.fetchone()["id"]
+    else:
+        cur = conn.execute(sql, (chat_id, role, content, ts, parent_message_id))
+        return cur.lastrowid
+
+
+# ── Schema (для НОВЫХ БД создаются старые таблицы; _migrate() приводит к финалу) ──
 
 _SCHEMA_PG = """
 CREATE TABLE IF NOT EXISTS chats (
@@ -215,6 +237,161 @@ CREATE TABLE IF NOT EXISTS chat_facts (
 """
 
 
+# ── Migration helpers ──
+
+def _column_exists(conn, table: str, col: str) -> bool:
+    if _PG:
+        cur = _execute(
+            conn,
+            "SELECT 1 FROM information_schema.columns "
+            f"WHERE table_name={_P} AND column_name={_P}",
+            (table, col),
+        )
+        return _fetchone(cur) is not None
+    else:
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        return any(r[1] == col for r in cur.fetchall())
+
+
+def _migrate(conn):
+    """Идемпотентно приводит схему к дереву и переносит легаси-данные."""
+    int_type = "INTEGER" if not _PG else "INTEGER"
+
+    # 1. messages.parent_message_id
+    if not _column_exists(conn, "messages", "parent_message_id"):
+        _execute(
+            conn,
+            f"ALTER TABLE messages ADD COLUMN parent_message_id {int_type} "
+            f"REFERENCES messages(id) ON DELETE CASCADE",
+        )
+    # 2. chats.current_leaf_message_id
+    if not _column_exists(conn, "chats", "current_leaf_message_id"):
+        _execute(
+            conn,
+            f"ALTER TABLE chats ADD COLUMN current_leaf_message_id {int_type} "
+            f"REFERENCES messages(id) ON DELETE SET NULL",
+        )
+    conn.commit()
+
+    # 3. indexes
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, id)")
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_message_id)")
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_chats_current_leaf ON chats(current_leaf_message_id)")
+    conn.commit()
+
+    # 4. backfill parent links: каждый чат, где parent ещё не проставлен
+    cur = _execute(conn, "SELECT id FROM chats")
+    chat_ids = [r["id"] for r in _fetchall(cur)]
+    for cid in chat_ids:
+        cur = _execute(
+            conn,
+            f"SELECT COUNT(*) AS n FROM messages WHERE chat_id={_P}",
+            (cid,),
+        )
+        total = _fetchone(cur)["n"]
+        if total <= 1:
+            continue
+        cur = _execute(
+            conn,
+            f"SELECT COUNT(*) AS n FROM messages "
+            f"WHERE chat_id={_P} AND parent_message_id IS NOT NULL",
+            (cid,),
+        )
+        if _fetchone(cur)["n"] > 0:
+            continue  # уже мигрирован
+        cur = _execute(
+            conn,
+            f"SELECT id FROM messages WHERE chat_id={_P} ORDER BY id",
+            (cid,),
+        )
+        ids = [r["id"] for r in _fetchall(cur)]
+        prev = None
+        for mid in ids:
+            if prev is not None:
+                _execute(
+                    conn,
+                    f"UPDATE messages SET parent_message_id={_P} WHERE id={_P}",
+                    (prev, mid),
+                )
+            prev = mid
+    conn.commit()
+
+    # 5. backfill current_leaf (только где NULL) = последнее сообщение чата
+    _execute(
+        conn,
+        "UPDATE chats SET current_leaf_message_id = "
+        "(SELECT MAX(id) FROM messages WHERE messages.chat_id = chats.id) "
+        "WHERE current_leaf_message_id IS NULL",
+    )
+    conn.commit()
+
+    # 6. summaries rebuild → composite PK (chat_id, branch_anchor_message_id)
+    if not _column_exists(conn, "summaries", "branch_anchor_message_id"):
+        _rebuild_summaries(conn)
+        conn.commit()
+
+    # 7. chat_facts rebuild → +branch_anchor_message_id, UNIQUE(chat_id, anchor, key)
+    if not _column_exists(conn, "chat_facts", "branch_anchor_message_id"):
+        _rebuild_chat_facts(conn)
+        conn.commit()
+
+
+def _rebuild_summaries(conn):
+    real = "DOUBLE PRECISION" if _PG else "REAL"
+    _execute(
+        conn,
+        f"CREATE TABLE summaries_new ("
+        f"  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,"
+        f"  branch_anchor_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,"
+        f"  summary_text TEXT NOT NULL,"
+        f"  created_at {real} NOT NULL,"
+        f"  PRIMARY KEY (chat_id, branch_anchor_message_id))",
+    )
+    # anchor = covers_messages_up_to_id (если >0), иначе current_leaf чата;
+    # осиротевшие (нет якоря) — отбрасываем.
+    _execute(
+        conn,
+        "INSERT INTO summaries_new (chat_id, branch_anchor_message_id, summary_text, created_at) "
+        "SELECT s.chat_id, "
+        "       COALESCE(NULLIF(s.covers_messages_up_to_id, 0), c.current_leaf_message_id), "
+        "       s.summary_text, s.created_at "
+        "FROM summaries s JOIN chats c ON c.id = s.chat_id "
+        "WHERE COALESCE(NULLIF(s.covers_messages_up_to_id, 0), c.current_leaf_message_id) IS NOT NULL",
+    )
+    _execute(conn, "DROP TABLE summaries")
+    _execute(conn, "ALTER TABLE summaries_new RENAME TO summaries")
+
+
+def _rebuild_chat_facts(conn):
+    real = "DOUBLE PRECISION" if _PG else "REAL"
+    pk = "SERIAL PRIMARY KEY" if _PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    _execute(
+        conn,
+        f"CREATE TABLE chat_facts_new ("
+        f"  id {pk},"
+        f"  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,"
+        f"  key TEXT NOT NULL,"
+        f"  value TEXT NOT NULL,"
+        f"  created_at {real} NOT NULL,"
+        f"  updated_at {real} NOT NULL,"
+        f"  branch_anchor_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,"
+        f"  UNIQUE(chat_id, branch_anchor_message_id, key))",
+    )
+    # anchor = корневое сообщение чата; осиротевшие факты (нет сообщений) — отбрасываем.
+    _execute(
+        conn,
+        "INSERT INTO chat_facts_new (chat_id, key, value, created_at, updated_at, branch_anchor_message_id) "
+        "SELECT f.chat_id, f.key, f.value, f.created_at, f.updated_at, "
+        "  (SELECT MIN(m.id) FROM messages m "
+        "   WHERE m.chat_id = f.chat_id AND m.parent_message_id IS NULL) "
+        "FROM chat_facts f "
+        "WHERE (SELECT MIN(m.id) FROM messages m "
+        "       WHERE m.chat_id = f.chat_id AND m.parent_message_id IS NULL) IS NOT NULL",
+    )
+    _execute(conn, "DROP TABLE chat_facts")
+    _execute(conn, "ALTER TABLE chat_facts_new RENAME TO chat_facts")
+
+
 def init_db():
     with _connect() as conn:
         if _PG:
@@ -223,6 +400,8 @@ def init_db():
             conn.commit()
         else:
             conn.executescript(_SCHEMA_SQLITE)
+
+        _migrate(conn)
 
         # Migrate: ensure every existing chat has a strategy_settings row
         if _PG:
@@ -250,30 +429,192 @@ def new_id():
     return uuid.uuid4().hex[:12]
 
 
+# ── Branch tree core ──
+
+def _get_current_leaf(conn, chat_id: str) -> int | None:
+    cur = _execute(
+        conn,
+        f"SELECT current_leaf_message_id FROM chats WHERE id={_P}",
+        (chat_id,),
+    )
+    row = _fetchone(cur)
+    return row["current_leaf_message_id"] if row else None
+
+
+def get_current_leaf(chat_id: str) -> int | None:
+    with _connect() as conn:
+        return _get_current_leaf(conn, chat_id)
+
+
+def set_current_leaf(chat_id: str, leaf_message_id: int | None):
+    now = time.time()
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE chats SET current_leaf_message_id={_P}, updated_at={_P} WHERE id={_P}",
+            (leaf_message_id, now, chat_id),
+        )
+        conn.commit()
+
+
+def _branch_path_rows(conn, chat_id: str, leaf_message_id: int) -> list[dict]:
+    """Путь root→leaf: список {id, role, content} через рекурсивный CTE."""
+    sql = (
+        f"WITH RECURSIVE branch_path(id, role, content, parent_message_id, depth) AS ("
+        f"  SELECT id, role, content, parent_message_id, 0 "
+        f"  FROM messages WHERE id={_P} AND chat_id={_P} "
+        f"  UNION ALL "
+        f"  SELECT m.id, m.role, m.content, m.parent_message_id, bp.depth + 1 "
+        f"  FROM messages m JOIN branch_path bp ON m.id = bp.parent_message_id "
+        f"  WHERE bp.depth < {MAX_BRANCH_DEPTH} "
+        f") SELECT id, role, content, parent_message_id FROM branch_path ORDER BY depth DESC"
+    )
+    cur = _execute(conn, sql, (leaf_message_id, chat_id))
+    return _fetchall(cur)
+
+
+def get_branch_history(chat_id: str, leaf_message_id: int | None) -> list[dict]:
+    """История активной ветки: [{id, role, content}] от корня до leaf."""
+    if leaf_message_id is None:
+        return []
+    with _connect() as conn:
+        return _branch_path_rows(conn, chat_id, leaf_message_id)
+
+
+def _branch_path_ids(conn, chat_id: str, leaf_message_id: int | None) -> set[int]:
+    if leaf_message_id is None:
+        return set()
+    return {r["id"] for r in _branch_path_rows(conn, chat_id, leaf_message_id)}
+
+
+def get_branch_tree(chat_id: str) -> list[dict]:
+    """Все сообщения чата (плоско) с parent — фронт строит дерево/навигаторы."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id, role, content, parent_message_id, ts "
+            f"FROM messages WHERE chat_id={_P} ORDER BY id",
+            (chat_id,),
+        )
+        return _fetchall(cur)
+
+
+def descend_to_leaf(chat_id: str, from_message_id: int) -> int:
+    """От узла вниз по последнему добавленному ребёнку каждого уровня до листа."""
+    with _connect() as conn:
+        current = from_message_id
+        for _ in range(MAX_BRANCH_DEPTH):
+            cur = _execute(
+                conn,
+                f"SELECT id FROM messages WHERE parent_message_id={_P} "
+                f"ORDER BY id DESC LIMIT 1",
+                (current,),
+            )
+            row = _fetchone(cur)
+            if not row:
+                break
+            current = row["id"]
+        return current
+
+
+def message_in_chat(chat_id: str, message_id: int) -> bool:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT 1 FROM messages WHERE id={_P} AND chat_id={_P}",
+            (message_id, chat_id),
+        )
+        return _fetchone(cur) is not None
+
+
+def get_message(message_id: int) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id, chat_id, role, content, parent_message_id FROM messages WHERE id={_P}",
+            (message_id,),
+        )
+        return _fetchone(cur)
+
+
+def create_branch_message(chat_id: str, from_message_id: int, user_message: str) -> int:
+    """Создаёт user-сообщение-ребёнка от from_message_id и делает его current_leaf.
+
+    Намеренное ветвление — без проверки expected_parent.
+    """
+    now = time.time()
+    with _connect() as conn:
+        mid = _insert_message(conn, chat_id, "user", user_message, now, from_message_id)
+        _execute(
+            conn,
+            f"UPDATE chats SET current_leaf_message_id={_P}, updated_at={_P} WHERE id={_P}",
+            (mid, now, chat_id),
+        )
+        conn.commit()
+        return mid
+
+
+def delete_message_subtree(message_id: int) -> dict:
+    """Каскадно удаляет сообщение и потомков. Если в поддереве был current_leaf —
+    переключает leaf на родителя удалённого. Возвращает {chat_id, new_leaf}.
+    """
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT chat_id, parent_message_id FROM messages WHERE id={_P}",
+            (message_id,),
+        )
+        msg = _fetchone(cur)
+        if not msg:
+            return {"chat_id": None, "new_leaf": None}
+        chat_id = msg["chat_id"]
+        parent = msg["parent_message_id"]
+
+        leaf = _get_current_leaf(conn, chat_id)
+        leaf_affected = leaf is not None and message_id in _branch_path_ids(conn, chat_id, leaf)
+
+        _execute(conn, f"DELETE FROM messages WHERE id={_P}", (message_id,))
+
+        new_leaf = leaf
+        if leaf_affected:
+            new_leaf = parent
+            _execute(
+                conn,
+                f"UPDATE chats SET current_leaf_message_id={_P}, updated_at={_P} WHERE id={_P}",
+                (new_leaf, time.time(), chat_id),
+            )
+        conn.commit()
+        return {"chat_id": chat_id, "new_leaf": new_leaf}
+
+
 # ── Chats CRUD ──
 
 def list_chats():
     with _connect() as conn:
         cur = _execute(
             conn,
-            "SELECT id, title, pinned, model, created_at, updated_at FROM chats "
-            "ORDER BY pinned DESC, updated_at DESC",
+            "SELECT id, title, pinned, model, created_at, updated_at, current_leaf_message_id "
+            "FROM chats ORDER BY pinned DESC, updated_at DESC",
         )
         return _fetchall(cur)
 
 
 def get_chat(chat_id: str):
+    """Чат + история АКТИВНОЙ ВЕТКИ (messages) + плоское дерево (tree)."""
     with _connect() as conn:
         cur = _execute(conn, f"SELECT * FROM chats WHERE id={_P}", (chat_id,))
         chat = _fetchone(cur)
         if not chat:
             return None
+        leaf = chat.get("current_leaf_message_id")
+        chat["messages"] = _branch_path_rows(conn, chat_id, leaf) if leaf else []
         cur = _execute(
             conn,
-            f"SELECT role, content FROM messages WHERE chat_id={_P} ORDER BY id",
+            f"SELECT id, role, content, parent_message_id, ts "
+            f"FROM messages WHERE chat_id={_P} ORDER BY id",
             (chat_id,),
         )
-        chat["messages"] = _fetchall(cur)
+        chat["tree"] = _fetchall(cur)
         return chat
 
 
@@ -387,68 +728,88 @@ def _archive_usage(conn, chat_id: str):
 
 # ── Messages ──
 
-def add_message(chat_id: str, role: str, content: str):
+def add_message(chat_id: str, role: str, content: str,
+                parent_message_id: int | None = None) -> int:
+    """Добавляет сообщение в активную ветку. Если parent не задан — чейнит к
+    текущему current_leaf. Двигает current_leaf на новое сообщение. Возвращает id.
+    """
     now = time.time()
     with _connect() as conn:
+        if parent_message_id is None:
+            parent_message_id = _get_current_leaf(conn, chat_id)
+        mid = _insert_message(conn, chat_id, role, content, now, parent_message_id)
         _execute(
             conn,
-            f"INSERT INTO messages (chat_id, role, content, ts) VALUES ({_P},{_P},{_P},{_P})",
-            (chat_id, role, content, now),
+            f"UPDATE chats SET updated_at={_P}, current_leaf_message_id={_P} WHERE id={_P}",
+            (now, mid, chat_id),
         )
-        _execute(conn, f"UPDATE chats SET updated_at={_P} WHERE id={_P}", (now, chat_id))
         conn.commit()
+        return mid
 
 
 def get_messages(chat_id: str):
+    """История активной ветки в формате [{role, content}] (для совместимости)."""
     with _connect() as conn:
-        cur = _execute(
-            conn,
-            f"SELECT role, content FROM messages WHERE chat_id={_P} ORDER BY id",
-            (chat_id,),
-        )
-        return _fetchall(cur)
+        leaf = _get_current_leaf(conn, chat_id)
+        rows = _branch_path_rows(conn, chat_id, leaf) if leaf else []
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
 
 
 def get_messages_with_ids(chat_id: str) -> list[dict]:
+    """История активной ветки [{id, role, content}] (для совместимости)."""
     with _connect() as conn:
+        leaf = _get_current_leaf(conn, chat_id)
+        return _branch_path_rows(conn, chat_id, leaf) if leaf else []
+
+
+# ── Summaries (branch-aware) ──
+
+def get_active_summary(chat_id: str, leaf_message_id: int | None) -> dict | None:
+    """Summary, чей anchor лежит НА ПУТИ от leaf до корня; берём ближайший к листу.
+
+    Anchor не на пути → summary охватывает события, которых в этой ветке не было,
+    значит неприменим — игнорируем.
+    """
+    if leaf_message_id is None:
+        return None
+    with _connect() as conn:
+        path = _branch_path_ids(conn, chat_id, leaf_message_id)
+        if not path:
+            return None
         cur = _execute(
             conn,
-            f"SELECT id, role, content FROM messages WHERE chat_id={_P} ORDER BY id",
+            f"SELECT branch_anchor_message_id, summary_text FROM summaries "
+            f"WHERE chat_id={_P} ORDER BY branch_anchor_message_id DESC",
             (chat_id,),
         )
-        return _fetchall(cur)
+        for r in _fetchall(cur):
+            if r["branch_anchor_message_id"] in path:
+                return {
+                    "summary_text": r["summary_text"],
+                    "covers_messages_up_to_id": r["branch_anchor_message_id"],
+                    "branch_anchor_message_id": r["branch_anchor_message_id"],
+                }
+        return None
 
 
-# ── Summaries ──
-
-def get_summary(chat_id: str) -> dict | None:
-    with _connect() as conn:
-        cur = _execute(
-            conn,
-            f"SELECT summary_text, covers_messages_up_to_id FROM summaries WHERE chat_id={_P}",
-            (chat_id,),
-        )
-        return _fetchone(cur)
-
-
-def save_summary(chat_id: str, summary_text: str, covers_up_to_id: int):
+def save_summary(chat_id: str, summary_text: str, branch_anchor_message_id: int):
     now = time.time()
     if _PG:
         sql = (
-            f"INSERT INTO summaries (chat_id, summary_text, created_at, covers_messages_up_to_id) "
+            f"INSERT INTO summaries (chat_id, branch_anchor_message_id, summary_text, created_at) "
             f"VALUES ({_P},{_P},{_P},{_P}) "
-            f"ON CONFLICT (chat_id) DO UPDATE SET "
-            f"summary_text=EXCLUDED.summary_text, created_at=EXCLUDED.created_at, "
-            f"covers_messages_up_to_id=EXCLUDED.covers_messages_up_to_id"
+            f"ON CONFLICT (chat_id, branch_anchor_message_id) DO UPDATE SET "
+            f"summary_text=EXCLUDED.summary_text, created_at=EXCLUDED.created_at"
         )
     else:
         sql = (
-            f"INSERT OR REPLACE INTO summaries "
-            f"(chat_id, summary_text, created_at, covers_messages_up_to_id) "
-            f"VALUES ({_P},{_P},{_P},{_P})"
+            f"INSERT INTO summaries (chat_id, branch_anchor_message_id, summary_text, created_at) "
+            f"VALUES ({_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id, branch_anchor_message_id) DO UPDATE SET "
+            f"summary_text=excluded.summary_text, created_at=excluded.created_at"
         )
     with _connect() as conn:
-        _execute(conn, sql, (chat_id, summary_text, now, covers_up_to_id))
+        _execute(conn, sql, (chat_id, branch_anchor_message_id, summary_text, now))
         conn.commit()
 
 
@@ -531,11 +892,16 @@ def import_chat(chat_id: str, title: str, pinned: bool, model: str,
     with _connect() as conn:
         _execute(conn, insert_sql,
                  (chat_id, title, int(pinned), model, created_at, updated_at))
+        parent = None
+        last_id = None
         for m in messages:
+            last_id = _insert_message(conn, chat_id, m["role"], m["content"], updated_at, parent)
+            parent = last_id
+        if last_id is not None:
             _execute(
                 conn,
-                f"INSERT INTO messages (chat_id, role, content, ts) VALUES ({_P},{_P},{_P},{_P})",
-                (chat_id, m["role"], m["content"], updated_at),
+                f"UPDATE chats SET current_leaf_message_id={_P} WHERE id={_P}",
+                (last_id, chat_id),
             )
         conn.commit()
 
@@ -653,58 +1019,79 @@ def update_strategy_settings(chat_id: str, **fields) -> dict:
     return get_strategy_settings(chat_id)
 
 
-# ── Chat Facts ──
+# ── Chat Facts (branch-aware) ──
 
 def get_chat_facts(chat_id: str) -> list[dict]:
+    """ВСЕ факты чата (по всем веткам). Для UI активной ветки см. get_active_facts."""
     with _connect() as conn:
         cur = _execute(
             conn,
-            f"SELECT id, key, value, created_at, updated_at "
+            f"SELECT id, key, value, branch_anchor_message_id, created_at, updated_at "
             f"FROM chat_facts WHERE chat_id={_P} ORDER BY id",
             (chat_id,),
         )
         return _fetchall(cur)
 
 
-def add_chat_fact(chat_id: str, key: str, value: str):
+def get_active_facts(chat_id: str, leaf_message_id: int | None) -> list[dict]:
+    """Факты активной ветки: подъём от leaf к корню, по каждому ключу берётся
+    ближайшая к листу запись. Надгробия (FACT_TOMBSTONE) скрывают ключ.
+    """
+    if leaf_message_id is None:
+        return []
+    with _connect() as conn:
+        path = _branch_path_ids(conn, chat_id, leaf_message_id)
+        if not path:
+            return []
+        cur = _execute(
+            conn,
+            f"SELECT id, key, value, branch_anchor_message_id, created_at, updated_at "
+            f"FROM chat_facts WHERE chat_id={_P}",
+            (chat_id,),
+        )
+        best: dict[str, dict] = {}
+        for r in _fetchall(cur):
+            anchor = r["branch_anchor_message_id"]
+            if anchor not in path:
+                continue
+            cur_best = best.get(r["key"])
+            if cur_best is None or anchor > cur_best["branch_anchor_message_id"]:
+                best[r["key"]] = r
+        result = [r for r in best.values() if r["value"] != FACT_TOMBSTONE]
+        result.sort(key=lambda r: r["id"])
+        return result
+
+
+def add_chat_fact(chat_id: str, key: str, value: str, branch_anchor_message_id: int):
+    """Upsert факта в точке ветки (anchor). add и update в экстракторе — оба сюда."""
     now = time.time()
     if _PG:
         sql = (
-            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at) "
-            f"VALUES ({_P},{_P},{_P},{_P},{_P}) "
-            f"ON CONFLICT (chat_id, key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at"
+            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at, branch_anchor_message_id) "
+            f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id, branch_anchor_message_id, key) "
+            f"DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at"
         )
     else:
         sql = (
-            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at) "
-            f"VALUES ({_P},{_P},{_P},{_P},{_P}) "
-            f"ON CONFLICT (chat_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
+            f"INSERT INTO chat_facts (chat_id, key, value, created_at, updated_at, branch_anchor_message_id) "
+            f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P}) "
+            f"ON CONFLICT (chat_id, branch_anchor_message_id, key) "
+            f"DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
         )
     with _connect() as conn:
-        _execute(conn, sql, (chat_id, key, value, now, now))
+        _execute(conn, sql, (chat_id, key, value, now, now, branch_anchor_message_id))
         conn.commit()
 
 
-def update_chat_fact(chat_id: str, key: str, value: str):
-    now = time.time()
-    with _connect() as conn:
-        _execute(
-            conn,
-            f"UPDATE chat_facts SET value={_P}, updated_at={_P} "
-            f"WHERE chat_id={_P} AND key={_P}",
-            (value, now, chat_id, key),
-        )
-        conn.commit()
+def update_chat_fact(chat_id: str, key: str, value: str, branch_anchor_message_id: int):
+    """Семантически = upsert в точке ветки."""
+    add_chat_fact(chat_id, key, value, branch_anchor_message_id)
 
 
-def delete_chat_fact_by_key(chat_id: str, key: str):
-    with _connect() as conn:
-        _execute(
-            conn,
-            f"DELETE FROM chat_facts WHERE chat_id={_P} AND key={_P}",
-            (chat_id, key),
-        )
-        conn.commit()
+def tombstone_chat_fact(chat_id: str, key: str, branch_anchor_message_id: int):
+    """Удаляет факт в текущей ветке через надгробие (не трогая предков/сиблингов)."""
+    add_chat_fact(chat_id, key, FACT_TOMBSTONE, branch_anchor_message_id)
 
 
 def delete_chat_fact_by_id(fact_id: int):

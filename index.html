@@ -109,6 +109,12 @@
       <main class="main">
         <div class="session-header">
           <span class="t-display glow-cyan" id="session-date" style="font-size:14px;letter-spacing:.04em"></span>
+          <span class="branch-indicator" id="branch-indicator" hidden>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+            </svg>
+            Ветвление активно
+          </span>
           <div class="session-line"></div>
           <span class="t-hud" id="session-time"></span>
           <button class="strategy-gear-btn" id="strategy-gear" type="button" title="Стратегии контекста">
@@ -262,7 +268,41 @@
        ======================================================== */
     let chatsList = [];
     let currentId = null;
-    let currentMessages = [];
+    let currentMessages = [];   // история активной ветки [{id, role, content}]
+    let currentTree = [];       // все сообщения чата [{id, role, content, parent_message_id}]
+    let currentLeaf = null;     // current_leaf_message_id активной ветки
+
+    const FORK_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
+
+    /* ── Branch tree helpers ── */
+    function treeById() { return new Map(currentTree.map(m => [m.id, m])); }
+
+    function childrenOf(id) {
+      return currentTree
+        .filter(m => m.parent_message_id === id)
+        .sort((a, b) => a.id - b.id);
+    }
+
+    function activePathSet() {
+      const byId = treeById();
+      const set = new Set();
+      let cur = currentLeaf, guard = 0;
+      while (cur != null && byId.has(cur) && guard++ < 5000) {
+        set.add(cur);
+        cur = byId.get(cur).parent_message_id;
+      }
+      return set;
+    }
+
+    function hasAnyFork() {
+      const counts = new Map();
+      for (const m of currentTree) {
+        if (m.parent_message_id == null) continue;
+        counts.set(m.parent_message_id, (counts.get(m.parent_message_id) || 0) + 1);
+      }
+      for (const n of counts.values()) if (n > 1) return true;
+      return false;
+    }
 
     function deriveTitle(text) {
       const t = (text || "").trim().replace(/\s+/g, " ");
@@ -291,6 +331,8 @@
     async function loadCurrentChat() {
       const data = await api("GET", `/api/chats/${currentId}`);
       currentMessages = data.messages || [];
+      currentTree = data.tree || [];
+      currentLeaf = data.current_leaf_message_id ?? null;
       // Подгрузить сохранённую статистику токенов из БД
       try {
         const usage = await api("GET", `/api/chats/${currentId}/usage`);
@@ -317,6 +359,8 @@
       currentId = id;
       await loadChats();
       currentMessages = [];
+      currentTree = [];
+      currentLeaf = null;
       renderAll();
       closeDrawer();
       inputEl.focus();
@@ -403,7 +447,9 @@
     function renderTranscript() {
       transcriptEl.innerHTML = "";
       if (currentMessages.length === 0) { showEmptyState(); return; }
-      for (const m of currentMessages) addBubble(m.role, m.content);
+      const pathSet = activePathSet();
+      for (const m of currentMessages) renderBubble(m, pathSet);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
 
     function syncModelSelect() {
@@ -413,7 +459,13 @@
       sidebarModelEl.value = v;
     }
 
-    function renderAll() { renderSidebar(); renderTranscript(); syncModelSelect(); }
+    function renderAll() {
+      renderSidebar();
+      renderTranscript();
+      syncModelSelect();
+      const ind = document.getElementById("branch-indicator");
+      if (ind) ind.hidden = !hasAnyFork();
+    }
 
     /* ========================================================
        Markdown + Bubbles
@@ -476,6 +528,220 @@
       return transcriptEl.lastElementChild.querySelector('.msg');
     }
 
+    /* Persisted message bubble with branch controls (fork btn + navigator). */
+    function renderBubble(m, pathSet) {
+      const empty = transcriptEl.querySelector("#empty");
+      if (empty) empty.remove();
+
+      const wrap = document.createElement("div");
+      wrap.className = "msg-wrap " + (m.role === "user" ? "user" : "bot");
+      wrap.dataset.mid = m.id;
+
+      if (m.role === "user") {
+        const msg = document.createElement("div");
+        msg.className = "msg user";
+        msg.textContent = m.content;
+        wrap.appendChild(msg);
+      } else {
+        const avatar = document.createElement("div");
+        avatar.className = "msg-avatar";
+        avatar.innerHTML = AVATAR_SVG;
+        wrap.appendChild(avatar);
+        const body = document.createElement("div");
+        body.className = "msg-body";
+        const meta = document.createElement("div");
+        meta.className = "msg-meta";
+        meta.innerHTML = '<span class="badge">CoS</span>';
+        body.appendChild(meta);
+        const msg = document.createElement("div");
+        msg.className = "msg bot";
+        msg.innerHTML = renderMarkdown(m.content);
+        body.appendChild(msg);
+        wrap.appendChild(body);
+      }
+
+      // Controls row: fork + delete subtree
+      const ctl = document.createElement("div");
+      ctl.className = "msg-controls";
+
+      const forkBtn = document.createElement("button");
+      forkBtn.type = "button";
+      forkBtn.className = "branch-btn";
+      forkBtn.title = m.role === "user" ? "Переформулировать вопрос" : "Продолжить иначе";
+      forkBtn.innerHTML = FORK_SVG + '<span>развилка</span>';
+      ctl.appendChild(forkBtn);
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "branch-btn branch-del";
+      delBtn.title = "Удалить эту ветку (сообщение и всё после него)";
+      delBtn.innerHTML = TRASH_SVG;
+      delBtn.addEventListener("click", () => deleteBranch(m));
+      ctl.appendChild(delBtn);
+
+      // Inline branch input (hidden by default)
+      const inlineWrap = document.createElement("div");
+      inlineWrap.className = "branch-inline";
+      inlineWrap.hidden = true;
+      const ta = document.createElement("textarea");
+      ta.rows = 1;
+      ta.placeholder = m.role === "user" ? "Переформулировать вопрос…" : "Продолжить иначе…";
+      const goBtn = document.createElement("button");
+      goBtn.type = "button";
+      goBtn.className = "btn btn-primary branch-go";
+      goBtn.textContent = "Создать ветку";
+      inlineWrap.appendChild(ta);
+      inlineWrap.appendChild(goBtn);
+
+      forkBtn.addEventListener("click", () => {
+        inlineWrap.hidden = !inlineWrap.hidden;
+        if (!inlineWrap.hidden) ta.focus();
+      });
+      const submit = () => {
+        const text = ta.value.trim();
+        if (!text) return;
+        startBranch(m, text);
+      };
+      goBtn.addEventListener("click", submit);
+      ta.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+      });
+
+      if (m.role === "user") {
+        wrap.appendChild(ctl);
+        wrap.appendChild(inlineWrap);
+      } else {
+        wrap.querySelector(".msg-body").appendChild(ctl);
+        wrap.querySelector(".msg-body").appendChild(inlineWrap);
+      }
+
+      transcriptEl.appendChild(wrap);
+
+      // Navigator under fork points (message with >1 direct children)
+      const kids = childrenOf(m.id);
+      if (kids.length > 1) {
+        const activeChild = kids.find(c => pathSet.has(c.id));
+        const idx = activeChild ? kids.indexOf(activeChild) : 0;
+        const nav = document.createElement("div");
+        nav.className = "branch-nav " + (m.role === "user" ? "user" : "bot");
+
+        const prev = document.createElement("button");
+        prev.type = "button"; prev.className = "branch-nav-arrow";
+        prev.textContent = "‹"; prev.disabled = idx <= 0;
+        prev.addEventListener("click", () => switchBranch(kids[idx - 1].id));
+
+        const label = document.createElement("span");
+        label.className = "branch-nav-label";
+        label.textContent = `${idx + 1}/${kids.length}`;
+
+        const next = document.createElement("button");
+        next.type = "button"; next.className = "branch-nav-arrow";
+        next.textContent = "›"; next.disabled = idx >= kids.length - 1;
+        next.addEventListener("click", () => switchBranch(kids[idx + 1].id));
+
+        nav.appendChild(prev);
+        nav.appendChild(label);
+        nav.appendChild(next);
+        transcriptEl.appendChild(nav);
+      }
+
+      return wrap;
+    }
+
+    async function switchBranch(childId) {
+      const data = await api("POST", `/api/chats/${currentId}/switch-branch`, { leaf_message_id: childId });
+      if (data && data.id) {
+        currentMessages = data.messages || [];
+        currentTree = data.tree || [];
+        currentLeaf = data.current_leaf_message_id ?? null;
+        renderAll();
+      }
+    }
+
+    async function deleteBranch(m) {
+      if (!confirm("Удалить это сообщение и всю ветку после него?")) return;
+      const data = await api("DELETE", `/api/messages/${m.id}/branch`);
+      if (data && data.chat) {
+        const chat = data.chat;
+        currentMessages = chat.messages || [];
+        currentTree = chat.tree || [];
+        currentLeaf = chat.current_leaf_message_id ?? null;
+        renderAll();
+      }
+    }
+
+    function startBranch(m, text) {
+      // user → ветка от РОДИТЕЛЯ; assistant → ветка от ЭТОГО сообщения
+      let fromId;
+      if (m.role === "user") {
+        if (m.parent_message_id == null) {
+          alert("Корневое сообщение нельзя переформулировать веткой — создайте новый чат.");
+          return;
+        }
+        fromId = m.parent_message_id;
+      } else {
+        fromId = m.id;
+      }
+      // optimistic user bubble
+      addBubble("user", text);
+      streamAssistant(`/api/chats/${currentId}/branch`, { from_message_id: fromId, user_message: text });
+    }
+
+    // Общий стрим-консьюмер для send() и startBranch().
+    // Печатает typing-бабл, обновляет currentLeaf по 'done',
+    // в конце перечитывает чат целиком (чтобы отрисовать навигаторы веток).
+    async function streamAssistant(url, body) {
+      sendBtn.disabled = true;
+      document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> THINKING';
+      const typingEl = showTyping();
+      let fullText = "";
+      try {
+        const res = await fetch(API + url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop();
+          for (const part of parts) {
+            if (!part.startsWith("data: ")) continue;
+            try {
+              const data = JSON.parse(part.slice(6));
+              if (data.type === "text") {
+                if (!fullText) document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> SPEAKING';
+                fullText += data.chunk;
+                typingEl.innerHTML = renderMarkdown(fullText);
+                transcriptEl.scrollTop = transcriptEl.scrollHeight;
+              }
+              if (data.type === "usage") updateTokenPanel(data);
+              if (data.type === "done" && data.leaf_message_id != null) currentLeaf = data.leaf_message_id;
+              if (data.type === "error") typingEl.textContent = "Ошибка: " + data.message;
+            } catch {}
+          }
+        }
+      } catch (e) {
+        typingEl.textContent = "Не удалось связаться с сервером: " + e;
+      } finally {
+        await loadChats();
+        renderSidebar();
+        await loadCurrentChat();
+        renderAll();
+        sendBtn.disabled = false;
+        document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> IDLE';
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        inputEl.focus();
+      }
+    }
+
     function showTyping() {
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
@@ -516,9 +782,28 @@
       const text = inputEl.value.trim();
       if (!text || !currentId) return;
 
+      // expected_parent_message_id = currentLeaf на момент отправки.
+      // Если на сервере ветка ушла вперёд (другая вкладка / параллельный стрим) —
+      // получим 409, перечитаем чат и попросим повторить.
+      const resp = await api("POST", `/api/chats/${currentId}/messages`, {
+        role: "user",
+        content: text,
+        expected_parent_message_id: currentLeaf,
+      });
+      if (resp && resp.error === "stale_leaf") {
+        if (resp.chat) {
+          currentMessages = resp.chat.messages || [];
+          currentTree = resp.chat.tree || [];
+          currentLeaf = resp.chat.current_leaf_message_id ?? null;
+          renderAll();
+        }
+        alert("Диалог изменился в другой вкладке. История обновлена — отправьте сообщение ещё раз.");
+        return;
+      }
+      currentLeaf = resp.current_leaf_message_id ?? currentLeaf;
+
       addBubble("user", text);
       currentMessages.push({ role: "user", content: text });
-      await api("POST", `/api/chats/${currentId}/messages`, { role: "user", content: text });
 
       const meta = currentChatMeta();
       if (meta && !meta.title) {
@@ -530,58 +815,8 @@
 
       inputEl.value = "";
       inputEl.style.height = "auto";
-      sendBtn.disabled = true;
-      document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> THINKING';
 
-      const typingEl = showTyping();
-      let fullText = "";
-
-      try {
-        const res = await fetch(API + "/chat/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: currentId, model: meta?.model }),
-        });
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop();
-          for (const part of parts) {
-            if (!part.startsWith("data: ")) continue;
-            try {
-              const data = JSON.parse(part.slice(6));
-              if (data.type === "text") {
-                if (!fullText) document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> SPEAKING';
-                fullText += data.chunk;
-                typingEl.innerHTML = renderMarkdown(fullText);
-                transcriptEl.scrollTop = transcriptEl.scrollHeight;
-              }
-              if (data.type === "usage") updateTokenPanel(data);
-              if (data.type === "error") typingEl.textContent = "Ошибка: " + data.message;
-            } catch {}
-          }
-        }
-
-        if (fullText) {
-          currentMessages.push({ role: "assistant", content: fullText });
-          await loadChats();
-          renderSidebar();
-        }
-      } catch (e) {
-        typingEl.textContent = "Не удалось связаться с сервером: " + e;
-      } finally {
-        sendBtn.disabled = false;
-        document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> IDLE';
-        transcriptEl.scrollTop = transcriptEl.scrollHeight;
-        inputEl.focus();
-      }
+      await streamAssistant("/chat/stream", { chat_id: currentId, model: meta?.model });
     }
 
     sendBtn.addEventListener("click", send);

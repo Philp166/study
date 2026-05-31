@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -14,8 +15,10 @@ load_dotenv(BASE_DIR / ".env", override=True)
 import edge_tts
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
+
+log = logging.getLogger("cos.branch")
 
 import anthropic
 
@@ -120,6 +123,21 @@ class Message(BaseModel):
     content: str
 
 
+class AddMessageRequest(BaseModel):
+    role: str
+    content: str
+    expected_parent_message_id: int | None = None
+
+
+class BranchCreateRequest(BaseModel):
+    from_message_id: int
+    user_message: str
+
+
+class SwitchBranchRequest(BaseModel):
+    leaf_message_id: int
+
+
 class ChatRequest(BaseModel):
     messages: list[Message]
     model: str | None = None
@@ -211,9 +229,23 @@ def api_delete_chat(chat_id: str):
 
 
 @app.post("/api/chats/{chat_id}/messages")
-def api_add_message(chat_id: str, msg: Message):
-    db.add_message(chat_id, msg.role, msg.content)
-    return {"ok": True}
+def api_add_message(chat_id: str, msg: AddMessageRequest):
+    # Защита от случайных веток: если клиент знает ожидаемого родителя
+    # (current_leaf на момент открытия вкладки), а он разошёлся с актуальным —
+    # значит ветку уже сдвинули в другой вкладке / при refresh во время стрима.
+    if msg.expected_parent_message_id is not None:
+        current = db.get_current_leaf(chat_id)
+        if msg.expected_parent_message_id != current:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "stale_leaf",
+                    "current_leaf_message_id": current,
+                    "chat": db.get_chat(chat_id),
+                },
+            )
+    mid = db.add_message(chat_id, msg.role, msg.content)
+    return {"ok": True, "id": mid, "current_leaf_message_id": mid}
 
 
 @app.get("/api/token-stats")
@@ -306,7 +338,8 @@ def api_update_strategy_settings(chat_id: str, updates: dict):
 
 @app.get("/api/chats/{chat_id}/facts")
 def api_get_facts(chat_id: str):
-    return db.get_chat_facts(chat_id)
+    leaf = db.get_current_leaf(chat_id)
+    return db.get_active_facts(chat_id, leaf)
 
 
 @app.delete("/api/chats/{chat_id}/facts/{fact_id}")
@@ -330,20 +363,21 @@ def api_migrate(req: MigrateRequest):
 
 # ── LLM Streaming (now with chat_id) ──
 
-@app.post("/chat/stream")
-async def chat_stream(req: StreamRequest):
-    chat = db.get_chat(req.chat_id)
-    if not chat:
-        return {"error": "chat not found"}
-    model = req.model if req.model in ALLOWED_MODELS else chat.get("model", DEFAULT_MODEL)
+def _stream_chat_response(chat_id: str, model: str,
+                          user_message_id: int | None,
+                          user_message_text: str | None) -> StreamingResponse:
+    """Общий конвейер ответа агента для обычной отправки и для ветвления.
 
-    last_msg = db.get_messages_with_ids(req.chat_id)
-    user_message = last_msg[-1]["content"] if last_msg and last_msg[-1]["role"] == "user" else None
-
+    Контекст собирается по активной ветке (leaf = user_message_id — это
+    сообщение, на которое отвечаем). Ответ ассистента сохраняется с
+    parent_message_id = user_message_id НАПРЯМУЮ, без повторного чтения
+    current_leaf после стрима — это защищает от смены ветки во время стрима.
+    """
     system_prompt, messages = summarizer.prepare_context(
-        client, model, req.chat_id,
+        client, model, chat_id,
         cos_agent.system_prompt,
-        user_message=user_message,
+        user_message_id,
+        user_message=user_message_text,
     )
 
     def generate():
@@ -352,10 +386,15 @@ async def chat_stream(req: StreamRequest):
             for chunk in cos_agent.respond_stream(messages, model=model, system_prompt=system_prompt):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
-            db.add_message(req.chat_id, "assistant", full_text)
+            # parent = id user-сообщения, зафиксированный до стрима;
+            # add_message также двигает current_leaf на id ответа.
+            assistant_id = db.add_message(
+                chat_id, "assistant", full_text,
+                parent_message_id=user_message_id,
+            )
             u = cos_agent.token_stats.last_usage
             db.save_usage(
-                req.chat_id, model,
+                chat_id, model,
                 u.input_tokens, u.output_tokens,
                 u.cache_creation_input_tokens, u.cache_read_input_tokens,
             )
@@ -363,14 +402,82 @@ async def chat_stream(req: StreamRequest):
                 "type": "usage",
                 **cos_agent.token_stats.to_dict(),
                 "context": cos_agent.get_context_pressure(model),
-                "chat_totals": db.get_chat_usage(req.chat_id),
+                "chat_totals": db.get_chat_usage(chat_id),
             }
             yield f"data: {json.dumps(usage_data)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: StreamRequest):
+    chat = db.get_chat(req.chat_id)
+    if not chat:
+        return {"error": "chat not found"}
+    model = req.model if req.model in ALLOWED_MODELS else chat.get("model", DEFAULT_MODEL)
+
+    msgs = chat.get("messages") or []
+    leaf = chat.get("current_leaf_message_id")
+    user_message = msgs[-1]["content"] if msgs and msgs[-1]["role"] == "user" else None
+
+    return _stream_chat_response(req.chat_id, model, leaf, user_message)
+
+
+@app.post("/api/chats/{chat_id}/branch")
+async def api_create_branch(chat_id: str, req: BranchCreateRequest):
+    """Намеренное ветвление: новое user-сообщение-ребёнок от from_message_id,
+    затем обычный конвейер ответа. Проверки expected_parent здесь нет.
+    """
+    chat = db.get_chat(chat_id)
+    if not chat:
+        return JSONResponse(status_code=404, content={"error": "chat_not_found"})
+    if not db.message_in_chat(chat_id, req.from_message_id):
+        return JSONResponse(status_code=404, content={"error": "from_message_not_in_chat"})
+
+    model = chat.get("model", DEFAULT_MODEL)
+    if model not in ALLOWED_MODELS:
+        model = DEFAULT_MODEL
+
+    new_user_id = db.create_branch_message(chat_id, req.from_message_id, req.user_message)
+    log.info("branch chat=%s from=%s new_user_msg=%s", chat_id, req.from_message_id, new_user_id)
+    return _stream_chat_response(chat_id, model, new_user_id, req.user_message)
+
+
+@app.post("/api/chats/{chat_id}/switch-branch")
+def api_switch_branch(chat_id: str, req: SwitchBranchRequest):
+    """Переключение активной ветки. От переданного узла спускаемся вниз по
+    последнему добавленному ребёнку каждого уровня до листа (навигатор).
+    """
+    if not db.message_in_chat(chat_id, req.leaf_message_id):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "not_in_chat", "chat": db.get_chat(chat_id)},
+        )
+    final_leaf = db.descend_to_leaf(chat_id, req.leaf_message_id)
+    db.set_current_leaf(chat_id, final_leaf)
+    log.info(
+        "switch-branch chat=%s requested=%s final_leaf=%s",
+        chat_id, req.leaf_message_id, final_leaf,
+    )
+    return db.get_chat(chat_id)
+
+
+@app.delete("/api/messages/{message_id}/branch")
+def api_delete_branch(message_id: int):
+    """Каскадно удаляет сообщение и потомков. Если в поддереве был current_leaf —
+    он переезжает на родителя удалённого.
+    """
+    res = db.delete_message_subtree(message_id)
+    if not res.get("chat_id"):
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    log.info(
+        "delete-branch msg=%s chat=%s new_leaf=%s",
+        message_id, res["chat_id"], res["new_leaf"],
+    )
+    return {"ok": True, **res, "chat": db.get_chat(res["chat_id"])}
 
 
 @app.get("/styles.css")
@@ -400,12 +507,14 @@ async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
     voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
 
+    voice_user_id = None
     if req.chat_id:
-        db.add_message(req.chat_id, "user", req.text)
+        voice_user_id = db.add_message(req.chat_id, "user", req.text)
 
         voice_system, messages = summarizer.prepare_context(
             client, VOICE_MODEL, req.chat_id,
             voice_base,
+            voice_user_id,
             user_message=req.text,
         )
     else:
@@ -452,7 +561,8 @@ async def voice_chat_stream(req: VoiceChatRequest):
                     if audio:
                         yield f"data: {json.dumps({'type': 'audio', 'data': audio})}\n\n"
                 if req.chat_id and full_text:
-                    db.add_message(req.chat_id, "assistant", full_text)
+                    db.add_message(req.chat_id, "assistant", full_text,
+                                   parent_message_id=voice_user_id)
                     u = cos_agent.token_stats.last_usage
                     db.save_usage(
                         req.chat_id, VOICE_MODEL,

@@ -149,6 +149,11 @@ def maybe_summarize(
 ) -> str | None:
     """Проверяет триггер и при необходимости запускает сжатие.
 
+    Работает по истории АКТИВНОЙ ВЕТКИ (all_msgs/recent — путь root→leaf).
+    Вдоль ветки id монотонно растут (ребёнок создаётся позже родителя),
+    поэтому фильтры по id корректно вырезают средний сегмент ветки.
+    Новый summary якорится на id последнего сжатого сообщения ветки.
+
     Возвращает актуальный summary_text (новый или старый) или None.
     """
     if settings is None:
@@ -231,9 +236,16 @@ def extract_and_apply_facts(
     client: anthropic.Anthropic,
     chat_id: str,
     user_message: str,
+    leaf_message_id: int,
 ) -> None:
-    """Вызывает фактоэкстрактор (Haiku) и применяет операции к chat_facts."""
-    current_facts = db.get_chat_facts(chat_id)
+    """Вызывает фактоэкстрактор (Haiku) и применяет операции к chat_facts.
+
+    Факты читаются из АКТИВНОЙ ВЕТКИ (подъём от leaf к корню), а записываются
+    с branch_anchor_message_id = leaf_message_id (это id текущего user-сообщения,
+    т.к. оно уже сохранено и стало current_leaf). Удаление — через надгробие,
+    чтобы не затронуть предков и соседние ветки.
+    """
+    current_facts = db.get_active_facts(chat_id, leaf_message_id)
     facts_text = "\n".join(f"{f['key']}: {f['value']}" for f in current_facts)
     if not facts_text:
         facts_text = "(пусто)"
@@ -277,13 +289,13 @@ def extract_and_apply_facts(
         return
 
     for item in data.get("delete", []):
-        db.delete_chat_fact_by_key(chat_id, item)
+        db.tombstone_chat_fact(chat_id, item, leaf_message_id)
 
     for item in data.get("update", []):
-        db.update_chat_fact(chat_id, item["key"], item["value"])
+        db.update_chat_fact(chat_id, item["key"], item["value"], leaf_message_id)
 
     for item in data.get("add", []):
-        db.add_chat_fact(chat_id, item["key"], item["value"])
+        db.add_chat_fact(chat_id, item["key"], item["value"], leaf_message_id)
 
 
 # ── Orchestrator: собирает messages с учётом всех трёх стратегий ──
@@ -293,26 +305,31 @@ def prepare_context(
     model: str,
     chat_id: str,
     base_system_prompt: str,
+    leaf_message_id: int | None,
     user_message: str | None = None,
 ) -> tuple[str, list[dict]]:
     """Возвращает (system_prompt, messages) для отправки в Claude.
 
+    Все три стратегии работают по истории АКТИВНОЙ ВЕТКИ — пути от
+    leaf_message_id до корня (рекурсивный CTE в db.get_branch_history).
+    Для линейного чата ветка == плоская история (поведение не меняется).
+
     Порядок:
-    A. Достаём историю и настройки
-    B. Если sticky_facts_enabled и есть user_message — извлекаем факты
-    C. Если rolling_summary_enabled и порог превышен — суммаризатор
-    D. Если sliding_window_enabled — срезаем окно
-    E. Собираем system prompt = base + summary + facts
+    A. Достаём историю ветки и настройки
+    B. Если sticky_facts_enabled и есть user_message — извлекаем факты (anchor=leaf)
+    C. Если rolling_summary_enabled и порог превышен — суммаризатор (по ветке)
+    D. Если sliding_window_enabled — срезаем окно ветки
+    E. Собираем system prompt = base + summary(ветки) + facts(ветки)
     """
     settings = db.get_strategy_settings(chat_id)
-    all_msgs = db.get_messages_with_ids(chat_id)
+    all_msgs = db.get_branch_history(chat_id, leaf_message_id)
 
-    # B: Sticky Facts — extract before building prompt
-    if settings.get("sticky_facts_enabled") and user_message:
-        extract_and_apply_facts(client, chat_id, user_message)
+    # B: Sticky Facts — extract before building prompt (anchor = текущий leaf)
+    if settings.get("sticky_facts_enabled") and user_message and leaf_message_id:
+        extract_and_apply_facts(client, chat_id, user_message, leaf_message_id)
 
-    # C: Rolling Summary
-    summary_record = db.get_summary(chat_id)
+    # C: Rolling Summary — summary, чей anchor на пути ветки
+    summary_record = db.get_active_summary(chat_id, leaf_message_id)
     recent, window_start_id = get_recent_window(all_msgs)
 
     summary_text = maybe_summarize(
@@ -322,17 +339,17 @@ def prepare_context(
         settings=settings,
     )
 
-    # D: Sliding Window
+    # D: Sliding Window — по истории ветки
     messages = [{"role": m["role"], "content": m["content"]} for m in recent]
 
     if settings.get("sliding_window_enabled"):
         window_size = settings.get("sliding_window_size", 20)
         messages = apply_sliding_window(messages, window_size)
 
-    # E: Build system prompt with facts
+    # E: Build system prompt with branch-active facts
     facts = None
     if settings.get("sticky_facts_enabled"):
-        facts_rows = db.get_chat_facts(chat_id)
+        facts_rows = db.get_active_facts(chat_id, leaf_message_id)
         if facts_rows:
             facts = facts_rows
 

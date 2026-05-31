@@ -1066,3 +1066,71 @@ body.settings-page { display: flex; flex-direction: column; }
   .usage-table { font-size: 10px; display: block; overflow-x: auto; }
   .usage-table th, .usage-table td { padding: 4px 6px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BRANCHING — fork buttons, inline input, navigator, indicator
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Header indicator: "Ветвление активно" */
+.branch-indicator {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--f-mono); font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--violet);
+  border: 1px solid var(--violet); border-radius: 3px;
+  padding: 2px 8px; margin-left: 10px;
+  box-shadow: 0 0 12px rgba(107,92,255,.3);
+}
+.branch-indicator svg { stroke: var(--violet); }
+
+/* Controls row under each message (fork + delete) */
+.msg-controls {
+  display: flex; gap: 6px; margin-top: 4px;
+  opacity: .55; transition: opacity .15s ease;
+}
+.msg-wrap.user .msg-controls { justify-content: flex-end; }
+.msg-wrap:hover .msg-controls { opacity: 1; }
+
+.branch-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; border: 1px solid var(--line-2); color: var(--ink-2);
+  font-family: var(--f-mono); font-size: 10px; letter-spacing: .04em;
+  text-transform: uppercase; padding: 3px 8px; border-radius: 3px;
+  cursor: pointer; transition: all .15s ease;
+}
+.branch-btn:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 10px rgba(0,240,255,.25); }
+.branch-btn svg { stroke: currentColor; }
+.branch-del:hover { color: var(--magenta); border-color: var(--magenta); box-shadow: 0 0 10px rgba(255,46,99,.25); }
+
+/* Inline fork input */
+.branch-inline {
+  display: flex; gap: 8px; margin-top: 6px; align-items: flex-end;
+  animation: rise .2s ease;
+}
+.branch-inline[hidden] { display: none; }
+.msg-wrap.user .branch-inline { justify-content: flex-end; }
+.branch-inline textarea {
+  flex: 1; max-width: 62%; resize: none;
+  background: var(--bg-1); border: 1px solid var(--line-2); color: var(--ink-0);
+  font-family: var(--f-display); font-size: 13.5px; line-height: 1.5;
+  padding: 8px 12px; border-radius: 4px; outline: none;
+}
+.branch-inline textarea:focus { border-color: var(--violet); box-shadow: 0 0 10px rgba(107,92,255,.3); }
+.branch-go { white-space: nowrap; font-size: 11px; padding: 6px 12px; }
+
+/* Branch navigator ‹ 1/2 › */
+.branch-nav {
+  display: flex; align-items: center; gap: 8px; margin: 2px 0 8px;
+}
+.branch-nav.user { justify-content: flex-end; }
+.branch-nav.bot { padding-left: 46px; }
+.branch-nav-arrow {
+  background: var(--bg-2); border: 1px solid var(--line-2); color: var(--ink-1);
+  width: 22px; height: 22px; border-radius: 3px; cursor: pointer;
+  font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  transition: all .15s ease;
+}
+.branch-nav-arrow:hover:not(:disabled) { color: var(--violet); border-color: var(--violet); box-shadow: 0 0 10px rgba(107,92,255,.3); }
+.branch-nav-arrow:disabled { opacity: .35; cursor: default; }
+.branch-nav-label {
+  font-family: var(--f-mono); font-size: 11px; color: var(--ink-1); letter-spacing: .06em;
+}
