@@ -499,22 +499,27 @@ def get_branch_tree(chat_id: str) -> list[dict]:
         return _fetchall(cur)
 
 
+def _descend_to_leaf(conn, from_message_id: int) -> int:
+    """Внутри открытого соединения: от узла вниз по последнему ребёнку до листа."""
+    current = from_message_id
+    for _ in range(MAX_BRANCH_DEPTH):
+        cur = _execute(
+            conn,
+            f"SELECT id FROM messages WHERE parent_message_id={_P} "
+            f"ORDER BY id DESC LIMIT 1",
+            (current,),
+        )
+        row = _fetchone(cur)
+        if not row:
+            break
+        current = row["id"]
+    return current
+
+
 def descend_to_leaf(chat_id: str, from_message_id: int) -> int:
     """От узла вниз по последнему добавленному ребёнку каждого уровня до листа."""
     with _connect() as conn:
-        current = from_message_id
-        for _ in range(MAX_BRANCH_DEPTH):
-            cur = _execute(
-                conn,
-                f"SELECT id FROM messages WHERE parent_message_id={_P} "
-                f"ORDER BY id DESC LIMIT 1",
-                (current,),
-            )
-            row = _fetchone(cur)
-            if not row:
-                break
-            current = row["id"]
-        return current
+        return _descend_to_leaf(conn, from_message_id)
 
 
 def message_in_chat(chat_id: str, message_id: int) -> bool:
@@ -577,7 +582,11 @@ def delete_message_subtree(message_id: int) -> dict:
 
         new_leaf = leaf
         if leaf_affected:
-            new_leaf = parent
+            # Лист уехал из удалённого поддерева. Спускаемся по уцелевшему
+            # ребёнку родителя на соседнюю ветку (после удаления своей развилки
+            # пользователь должен оказаться на оставшейся ветке целиком, а не
+            # «зависнуть» на родителе с обрезанной историей).
+            new_leaf = None if parent is None else _descend_to_leaf(conn, parent)
             _execute(
                 conn,
                 f"UPDATE chats SET current_leaf_message_id={_P}, updated_at={_P} WHERE id={_P}",

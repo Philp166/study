@@ -174,6 +174,23 @@ def test_delete_subtree_on_active_path_moves_leaf_to_parent(fresh_db):
     assert remaining == {m1, m2}  # m3, m4 удалены каскадом
 
 
+def test_delete_active_branch_tail_restores_sibling_leaf(fresh_db):
+    """Удаляя уникальный хвост текущей ветки, лист съезжает на соседнюю ветку
+    ЦЕЛИКОМ (до её листа), а не зависает на общем предке-развилке."""
+    chat = _new_chat()
+    m1, m2, m3, m4 = _linear(chat, "q1", "a1", "q2", "a2")
+    m5 = db.create_branch_message(chat, m2, "q2-alt")   # ветка 2 от развилки m2
+    m6 = db.add_message(chat, "assistant", "a2-alt")
+    assert db.get_current_leaf(chat) == m6
+
+    res = db.delete_message_subtree(m5)                  # сносим уникальный хвост ветки 2
+    assert res["new_leaf"] == m4                         # не m2, а лист соседней ветки
+    assert db.get_current_leaf(chat) == m4
+    assert [h["id"] for h in db.get_branch_history(chat, m4)] == [m1, m2, m3, m4]
+    remaining = {t["id"] for t in db.get_branch_tree(chat)}
+    assert remaining == {m1, m2, m3, m4}                 # ветка 1 нетронута
+
+
 def test_delete_subtree_off_path_keeps_active_leaf(fresh_db):
     chat = _new_chat()
     m1, m2, m3, m4 = _linear(chat, "q1", "a1", "q2", "a2")

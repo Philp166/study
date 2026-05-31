@@ -305,6 +305,36 @@
       return false;
     }
 
+    // Активный путь root→leaf (упорядоченный список id).
+    function activePathOrdered() {
+      const byId = treeById();
+      const arr = [];
+      let cur = currentLeaf, g = 0;
+      while (cur != null && byId.has(cur) && g++ < 5000) {
+        arr.push(cur);
+        cur = byId.get(cur).parent_message_id;
+      }
+      return arr.reverse();
+    }
+
+    // Самая глубокая точка ветвления на активном пути (узел с >1 ребёнком).
+    function lastForkIdOnPath() {
+      let last = null;
+      for (const id of activePathOrdered()) if (childrenOf(id).length > 1) last = id;
+      return last;
+    }
+
+    // Удалять можно только то, что уникально для текущей ветки: сообщения ниже
+    // последней развилки. Иначе корзина снесла бы общего предка и СОСЕДНИЕ ветки.
+    function isBranchDeletable(m) {
+      const path = activePathOrdered();
+      const idx = path.indexOf(m.id);
+      if (idx === -1) return false;            // вне активной ветки
+      const forkId = lastForkIdOnPath();
+      if (forkId == null) return true;         // линейный чат — удаление с этого места
+      return idx > path.indexOf(forkId);       // строго ниже развилки
+    }
+
     function deriveTitle(text) {
       const t = (text || "").trim().replace(/\s+/g, " ");
       if (!t) return "";
@@ -565,9 +595,13 @@
       const ctl = document.createElement("div");
       ctl.className = "msg-controls";
 
-      // Форк user-сообщения = ветка от РОДИТЕЛЯ. У корневого вопроса родителя нет,
-      // поэтому развилку под ним не показываем (для альтернативы — новый чат).
-      const canFork = m.role === "assistant" || m.parent_message_id != null;
+      // Якорь форка: user → РОДИТЕЛЬ, assistant → САМ узел. Развилку показываем
+      // только если у якоря УЖЕ есть ребёнок — тогда новое сообщение становится
+      // вторым ребёнком (видимый сиблинг + навигатор). Форк листа создал бы лишь
+      // линейное продолжение «в основную ветку» — это сбивало с толку, поэтому
+      // на последнем сообщении ветки кнопки форка нет (продолжай обычным вводом).
+      const anchorId = m.role === "user" ? m.parent_message_id : m.id;
+      const canFork = anchorId != null && childrenOf(anchorId).length >= 1;
 
       const inlineWrap = document.createElement("div");
       const ta = document.createElement("textarea");
@@ -613,13 +647,17 @@
         });
       }
 
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "branch-btn branch-del";
-      delBtn.title = "Удалить эту ветку (сообщение и всё после него)";
-      delBtn.innerHTML = TRASH_SVG;
-      delBtn.addEventListener("click", () => deleteBranch(m));
-      ctl.appendChild(delBtn);
+      // Корзина — только на уникальном «хвосте» текущей ветки (ниже развилки),
+      // чтобы нельзя было снести общего предка вместе с соседними ветками.
+      if (isBranchDeletable(m)) {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "branch-btn branch-del";
+        delBtn.title = "Удалить эту ветку (это сообщение и всё после него)";
+        delBtn.innerHTML = TRASH_SVG;
+        delBtn.addEventListener("click", () => deleteBranch(m));
+        ctl.appendChild(delBtn);
+      }
 
       if (m.role === "user") {
         wrap.appendChild(ctl);
