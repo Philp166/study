@@ -271,6 +271,7 @@
     let currentMessages = [];   // история активной ветки [{id, role, content}]
     let currentTree = [];       // все сообщения чата [{id, role, content, parent_message_id}]
     let currentLeaf = null;     // current_leaf_message_id активной ветки
+    let streaming = false;      // идёт стрим ответа — блокирует повторную отправку
 
     const FORK_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
 
@@ -564,12 +565,53 @@
       const ctl = document.createElement("div");
       ctl.className = "msg-controls";
 
-      const forkBtn = document.createElement("button");
-      forkBtn.type = "button";
-      forkBtn.className = "branch-btn";
-      forkBtn.title = m.role === "user" ? "Переформулировать вопрос" : "Продолжить иначе";
-      forkBtn.innerHTML = FORK_SVG + '<span>развилка</span>';
-      ctl.appendChild(forkBtn);
+      // Форк user-сообщения = ветка от РОДИТЕЛЯ. У корневого вопроса родителя нет,
+      // поэтому развилку под ним не показываем (для альтернативы — новый чат).
+      const canFork = m.role === "assistant" || m.parent_message_id != null;
+
+      const inlineWrap = document.createElement("div");
+      const ta = document.createElement("textarea");
+      const goBtn = document.createElement("button");
+
+      if (canFork) {
+        const forkBtn = document.createElement("button");
+        forkBtn.type = "button";
+        forkBtn.className = "branch-btn";
+        forkBtn.title = m.role === "user"
+          ? "Спросить иначе — создать параллельную ветку от этого вопроса"
+          : "Ответить иначе — создать параллельную ветку от этого ответа";
+        forkBtn.innerHTML = FORK_SVG + '<span>развилка</span>';
+        ctl.appendChild(forkBtn);
+
+        inlineWrap.className = "branch-inline";
+        inlineWrap.hidden = true;
+        ta.rows = 1;
+        ta.placeholder = m.role === "user"
+          ? "Переформулировать вопрос…"
+          : "Задать другой вопрос в новой ветке…";
+        goBtn.type = "button";
+        goBtn.className = "btn btn-primary branch-go";
+        goBtn.textContent = "Создать ветку";
+        inlineWrap.appendChild(ta);
+        inlineWrap.appendChild(goBtn);
+
+        forkBtn.addEventListener("click", () => {
+          inlineWrap.hidden = !inlineWrap.hidden;
+          if (!inlineWrap.hidden) ta.focus();
+        });
+        const submit = () => {
+          if (streaming) return;
+          const text = ta.value.trim();
+          if (!text) return;
+          inlineWrap.hidden = true;   // сразу закрываем, чтобы не было дубль-отправки
+          ta.value = "";
+          startBranch(m, text);
+        };
+        goBtn.addEventListener("click", submit);
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+        });
+      }
 
       const delBtn = document.createElement("button");
       delBtn.type = "button";
@@ -579,40 +621,12 @@
       delBtn.addEventListener("click", () => deleteBranch(m));
       ctl.appendChild(delBtn);
 
-      // Inline branch input (hidden by default)
-      const inlineWrap = document.createElement("div");
-      inlineWrap.className = "branch-inline";
-      inlineWrap.hidden = true;
-      const ta = document.createElement("textarea");
-      ta.rows = 1;
-      ta.placeholder = m.role === "user" ? "Переформулировать вопрос…" : "Продолжить иначе…";
-      const goBtn = document.createElement("button");
-      goBtn.type = "button";
-      goBtn.className = "btn btn-primary branch-go";
-      goBtn.textContent = "Создать ветку";
-      inlineWrap.appendChild(ta);
-      inlineWrap.appendChild(goBtn);
-
-      forkBtn.addEventListener("click", () => {
-        inlineWrap.hidden = !inlineWrap.hidden;
-        if (!inlineWrap.hidden) ta.focus();
-      });
-      const submit = () => {
-        const text = ta.value.trim();
-        if (!text) return;
-        startBranch(m, text);
-      };
-      goBtn.addEventListener("click", submit);
-      ta.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
-      });
-
       if (m.role === "user") {
         wrap.appendChild(ctl);
-        wrap.appendChild(inlineWrap);
+        if (canFork) wrap.appendChild(inlineWrap);
       } else {
         wrap.querySelector(".msg-body").appendChild(ctl);
-        wrap.querySelector(".msg-body").appendChild(inlineWrap);
+        if (canFork) wrap.querySelector(".msg-body").appendChild(inlineWrap);
       }
 
       transcriptEl.appendChild(wrap);
@@ -671,17 +685,10 @@
     }
 
     function startBranch(m, text) {
+      if (streaming) return;
       // user → ветка от РОДИТЕЛЯ; assistant → ветка от ЭТОГО сообщения
-      let fromId;
-      if (m.role === "user") {
-        if (m.parent_message_id == null) {
-          alert("Корневое сообщение нельзя переформулировать веткой — создайте новый чат.");
-          return;
-        }
-        fromId = m.parent_message_id;
-      } else {
-        fromId = m.id;
-      }
+      const fromId = m.role === "user" ? m.parent_message_id : m.id;
+      if (fromId == null) return;  // корень: форкать не от чего
       // optimistic user bubble
       addBubble("user", text);
       streamAssistant(`/api/chats/${currentId}/branch`, { from_message_id: fromId, user_message: text });
@@ -691,6 +698,8 @@
     // Печатает typing-бабл, обновляет currentLeaf по 'done',
     // в конце перечитывает чат целиком (чтобы отрисовать навигаторы веток).
     async function streamAssistant(url, body) {
+      if (streaming) return;
+      streaming = true;
       sendBtn.disabled = true;
       document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> THINKING';
       const typingEl = showTyping();
@@ -735,6 +744,7 @@
         renderSidebar();
         await loadCurrentChat();
         renderAll();
+        streaming = false;
         sendBtn.disabled = false;
         document.getElementById("agent-status").innerHTML = '<span class="dot dot-pulse"></span> IDLE';
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -779,6 +789,7 @@
        Send
        ======================================================== */
     async function send() {
+      if (streaming) return;
       const text = inputEl.value.trim();
       if (!text || !currentId) return;
 
