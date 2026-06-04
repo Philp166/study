@@ -389,7 +389,7 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 
 /* ── Messages ─────────────────────────────────────────── */
 .msg-wrap { display: flex; margin-bottom: 2px; }
-.msg-wrap.user { justify-content: flex-end; }
+.msg-wrap.user { justify-content: flex-end; flex-wrap: wrap; }
 .msg-wrap.bot { gap: 10px; }
 
 .msg-avatar {
@@ -1087,7 +1087,7 @@ body.settings-page { display: flex; flex-direction: column; }
   display: flex; gap: 6px; margin-top: 4px;
   opacity: .55; transition: opacity .15s ease;
 }
-.msg-wrap.user .msg-controls { justify-content: flex-end; }
+.msg-wrap.user .msg-controls { width: 100%; justify-content: flex-end; }
 .msg-wrap:hover .msg-controls { opacity: 1; }
 
 .branch-btn {
@@ -1107,7 +1107,7 @@ body.settings-page { display: flex; flex-direction: column; }
   animation: rise .2s ease;
 }
 .branch-inline[hidden] { display: none; }
-.msg-wrap.user .branch-inline { justify-content: flex-end; }
+.msg-wrap.user .branch-inline { width: 100%; justify-content: flex-end; }
 .branch-inline textarea {
   flex: 1; max-width: 62%; resize: none;
   background: var(--bg-1); border: 1px solid var(--line-2); color: var(--ink-0);
