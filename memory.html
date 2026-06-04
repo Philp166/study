@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/auth-gate.js"></script>
+  <title>CoS — Память</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="memory-page">
+  <div class="crt-overlay"></div>
+  <div class="vignette"></div>
+
+  <div class="settings-header">
+    <div class="runline top"></div>
+    <a href="/settings" class="back-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+      </svg>
+      Настройки
+    </a>
+    <span class="header-title">
+      <span class="glitch flicker" data-text="ПАМЯТЬ">ПАМЯТЬ</span>
+      <span class="mono" style="font-size:10px;color:var(--ink-2);margin-left:8px">// MEMORY</span>
+    </span>
+    <div style="width:90px"></div>
+  </div>
+
+  <!-- ── Control strip ── -->
+  <div class="mem-controls">
+    <div class="mem-ctl">
+      <span class="t-hud">Чтение</span>
+      <label class="wakeword-switch"><input type="checkbox" id="ctl-read" /><span class="wakeword-slider"></span></label>
+    </div>
+    <div class="mem-ctl">
+      <span class="t-hud">Вектор</span>
+      <label class="wakeword-switch"><input type="checkbox" id="ctl-vector" /><span class="wakeword-slider"></span></label>
+    </div>
+    <div class="mem-ctl">
+      <span class="t-hud">Запись</span>
+      <label class="wakeword-switch"><input type="checkbox" id="ctl-write" /><span class="wakeword-slider"></span></label>
+    </div>
+    <div class="mem-ctl">
+      <span class="t-hud">Бюджет токенов</span>
+      <input type="number" class="settings-input mem-budget" id="ctl-budget" min="100" max="4000" step="50" />
+    </div>
+    <div class="mem-ctl-spacer"></div>
+    <div class="mem-ctl">
+      <span class="t-hud" id="mem-stat">— узлов · — связей</span>
+    </div>
+  </div>
+
+  <!-- ── Layout: folders | graph | dossier ── -->
+  <div class="mem-layout">
+
+    <aside class="mem-folders panel-cut">
+      <div class="panel-inner">
+        <div class="mem-panel-head">
+          <span class="t-hud glow-cyan">Направления</span>
+        </div>
+        <div class="mem-folder-list" id="folder-list">
+          <div class="mem-empty-mini">Загрузка…</div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="mem-graph panel-cut">
+      <div class="panel-inner">
+        <div class="mem-graph-head">
+          <span class="t-hud" id="graph-title">Весь граф</span>
+          <button class="btn btn-ghost mem-reset" id="reset-view" title="Сбросить вид">Сброс вида</button>
+        </div>
+        <div class="mem-field-wrap" id="field-wrap">
+          <svg id="field" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="2.2" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <g id="viewport">
+              <g id="edges"></g>
+              <g id="edge-labels"></g>
+              <g id="nodes"></g>
+            </g>
+          </svg>
+          <div class="mem-empty" id="field-empty" hidden>
+            <div class="t-display" style="font-size:18px">Память пуста</div>
+            <div class="t-meta" style="margin-top:8px">Напиши в чате «запомни …» — узлы появятся здесь.</div>
+          </div>
+          <div class="mem-legend" id="legend"></div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="mem-dossier panel-cut" id="dossier" hidden>
+      <div class="panel-inner">
+        <div class="mem-dossier-head">
+          <span class="status-pill" id="dos-type">—</span>
+          <button class="icon-btn mem-dossier-close" id="dos-close" title="Закрыть">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="runline top"></div>
+        <h2 class="mem-dossier-name" id="dos-name">—</h2>
+        <div class="mem-dossier-basis t-meta" id="dos-basis"></div>
+
+        <div class="mem-dossier-section">
+          <div class="t-hud">Атрибуты</div>
+          <div class="mem-kv" id="dos-attrs"></div>
+        </div>
+
+        <div class="mem-dossier-section">
+          <div class="t-hud">Метаданные</div>
+          <div class="mem-kv" id="dos-meta"></div>
+        </div>
+
+        <div class="mem-dossier-section">
+          <div class="t-hud">Связи</div>
+          <div class="mem-conns" id="dos-conns"></div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <script>
+    const API = "";
+    async function api(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      return res.json();
+    }
+
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const W = 1000, H = 680;            // внутренняя система координат поля
+    const TYPE_COLORS = {
+      Person: "#00f0ff", Org: "#ff2e63", Project: "#6b5cff", Task: "#fcee0a",
+      Decision: "#ff8a00", Document: "#3df0a0", Event: "#ff5cf0", Money: "#7cff5c",
+      Place: "#5cc8ff", Topic: "#c08bff",
+    };
+    const colorOf = (t) => TYPE_COLORS[t] || "#aab0e0";
+
+    const els = {
+      field: document.getElementById("field"),
+      viewport: document.getElementById("viewport"),
+      gEdges: document.getElementById("edges"),
+      gEdgeLabels: document.getElementById("edge-labels"),
+      gNodes: document.getElementById("nodes"),
+      empty: document.getElementById("field-empty"),
+      legend: document.getElementById("legend"),
+      folderList: document.getElementById("folder-list"),
+      graphTitle: document.getElementById("graph-title"),
+      stat: document.getElementById("mem-stat"),
+      dossier: document.getElementById("dossier"),
+    };
+    els.field.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+    let G = { nodes: [], edges: [] };  // текущий граф
+    let pos = {};                       // id -> {x,y}
+    let view = { tx: 0, ty: 0, s: 1 };
+
+    /* ── Force-directed layout (свой, без библиотек) ── */
+    function layout(nodes, edges) {
+      const p = {};
+      const n = nodes.length || 1;
+      nodes.forEach((node, i) => {
+        const a = (i / n) * Math.PI * 2;
+        p[node.id] = {
+          x: W / 2 + Math.cos(a) * 180 + (Math.random() - 0.5) * 40,
+          y: H / 2 + Math.sin(a) * 150 + (Math.random() - 0.5) * 40,
+        };
+      });
+      const ids = new Set(nodes.map((x) => x.id));
+      const E = edges.filter((e) => ids.has(e.src_id) && ids.has(e.dst_id));
+      const REP = 42000, SPRING = 0.02, LEN = 150, GRAV = 0.012;
+      for (let iter = 0; iter < 320; iter++) {
+        const fx = {}, fy = {};
+        nodes.forEach((nd) => { fx[nd.id] = 0; fy[nd.id] = 0; });
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const A = p[nodes[i].id], B = p[nodes[j].id];
+            let dx = A.x - B.x, dy = A.y - B.y;
+            let d2 = dx * dx + dy * dy || 0.01;
+            const f = REP / d2;
+            const d = Math.sqrt(d2);
+            const ux = dx / d, uy = dy / d;
+            fx[nodes[i].id] += ux * f; fy[nodes[i].id] += uy * f;
+            fx[nodes[j].id] -= ux * f; fy[nodes[j].id] -= uy * f;
+          }
+        }
+        for (const e of E) {
+          const A = p[e.src_id], B = p[e.dst_id];
+          let dx = B.x - A.x, dy = B.y - A.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const f = (d - LEN) * SPRING;
+          const ux = dx / d, uy = dy / d;
+          fx[e.src_id] += ux * f; fy[e.src_id] += uy * f;
+          fx[e.dst_id] -= ux * f; fy[e.dst_id] -= uy * f;
+        }
+        for (const nd of nodes) {
+          fx[nd.id] += (W / 2 - p[nd.id].x) * GRAV;
+          fy[nd.id] += (H / 2 - p[nd.id].y) * GRAV;
+          p[nd.id].x += Math.max(-30, Math.min(30, fx[nd.id]));
+          p[nd.id].y += Math.max(-30, Math.min(30, fy[nd.id]));
+          p[nd.id].x = Math.max(40, Math.min(W - 40, p[nd.id].x));
+          p[nd.id].y = Math.max(30, Math.min(H - 30, p[nd.id].y));
+        }
+      }
+      return p;
+    }
+
+    function applyView() {
+      els.viewport.setAttribute(
+        "transform", `translate(${view.tx} ${view.ty}) scale(${view.s})`
+      );
+    }
+    function resetView() { view = { tx: 0, ty: 0, s: 1 }; applyView(); }
+
+    function nodeWidth(name) {
+      return Math.max(54, Math.min(220, (name || "").length * 8.2 + 26));
+    }
+
+    function render() {
+      els.gEdges.innerHTML = "";
+      els.gEdgeLabels.innerHTML = "";
+      els.gNodes.innerHTML = "";
+      const byId = Object.fromEntries(G.nodes.map((n) => [n.id, n]));
+
+      for (const e of G.edges) {
+        const A = pos[e.src_id], B = pos[e.dst_id];
+        if (!A || !B) continue;
+        const line = document.createElementNS(SVGNS, "line");
+        line.setAttribute("x1", A.x); line.setAttribute("y1", A.y);
+        line.setAttribute("x2", B.x); line.setAttribute("y2", B.y);
+        line.setAttribute("class", "mem-edge");
+        els.gEdges.appendChild(line);
+        const lbl = document.createElementNS(SVGNS, "text");
+        lbl.setAttribute("x", (A.x + B.x) / 2);
+        lbl.setAttribute("y", (A.y + B.y) / 2 - 3);
+        lbl.setAttribute("class", "mem-edge-label");
+        lbl.textContent = e.type;
+        els.gEdgeLabels.appendChild(lbl);
+      }
+
+      for (const n of G.nodes) {
+        const P = pos[n.id];
+        if (!P) continue;
+        const col = colorOf(n.type);
+        const w = nodeWidth(n.name), h = 30, c = 7;
+        const g = document.createElementNS(SVGNS, "g");
+        g.setAttribute("class", "mem-node");
+        g.setAttribute("transform", `translate(${P.x} ${P.y})`);
+        g.dataset.id = n.id;
+        const poly = document.createElementNS(SVGNS, "polygon");
+        const x0 = -w / 2, y0 = -h / 2;
+        poly.setAttribute("points",
+          `${x0 + c},${y0} ${x0 + w},${y0} ${x0 + w},${y0 + h - c} ${x0 + w - c},${y0 + h} ${x0},${y0 + h} ${x0},${y0 + c}`);
+        poly.setAttribute("class", "mem-node-shape");
+        poly.style.stroke = col;
+        poly.style.fill = "rgba(10,10,31,.92)";
+        const txt = document.createElementNS(SVGNS, "text");
+        txt.setAttribute("class", "mem-node-label");
+        txt.setAttribute("text-anchor", "middle");
+        txt.setAttribute("dy", "0.34em");
+        txt.style.fill = col;
+        txt.textContent = n.name;
+        g.appendChild(poly); g.appendChild(txt);
+        els.gNodes.appendChild(g);
+        bindNode(g, n.id);
+      }
+      els.empty.hidden = G.nodes.length > 0;
+      els.stat.textContent = `${G.nodes.length} узлов · ${G.edges.length} связей`;
+    }
+
+    /* ── Node drag + click ── */
+    function bindNode(g, id) {
+      let down = null, moved = false;
+      g.addEventListener("pointerdown", (ev) => {
+        ev.stopPropagation();
+        down = { x: ev.clientX, y: ev.clientY };
+        moved = false;
+        g.setPointerCapture(ev.pointerId);
+      });
+      g.addEventListener("pointermove", (ev) => {
+        if (!down) return;
+        if (Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 4) moved = true;
+        const r = els.field.getBoundingClientRect();
+        const scaleX = W / r.width, scaleY = H / r.height;
+        pos[id].x = (ev.clientX - r.left) * scaleX / view.s - view.tx / view.s;
+        pos[id].y = (ev.clientY - r.top) * scaleY / view.s - view.ty / view.s;
+        render();
+      });
+      g.addEventListener("pointerup", (ev) => {
+        g.releasePointerCapture(ev.pointerId);
+        if (!moved) openDossier(id);
+        down = null;
+      });
+    }
+
+    /* ── Pan / zoom ── */
+    (function panZoom() {
+      let pan = null;
+      els.field.addEventListener("pointerdown", (ev) => {
+        pan = { x: ev.clientX, y: ev.clientY, tx: view.tx, ty: view.ty };
+      });
+      window.addEventListener("pointermove", (ev) => {
+        if (!pan) return;
+        const r = els.field.getBoundingClientRect();
+        const k = W / r.width;
+        view.tx = pan.tx + (ev.clientX - pan.x) * k;
+        view.ty = pan.ty + (ev.clientY - pan.y) * k;
+        applyView();
+      });
+      window.addEventListener("pointerup", () => { pan = null; });
+      els.field.addEventListener("wheel", (ev) => {
+        ev.preventDefault();
+        const r = els.field.getBoundingClientRect();
+        const mx = (ev.clientX - r.left) * (W / r.width);
+        const my = (ev.clientY - r.top) * (H / r.height);
+        const ds = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
+        const ns = Math.max(0.3, Math.min(3, view.s * ds));
+        view.tx = mx - (mx - view.tx) * (ns / view.s);
+        view.ty = my - (my - view.ty) * (ns / view.s);
+        view.s = ns;
+        applyView();
+      }, { passive: false });
+    })();
+
+    /* ── Graph loading ── */
+    function setGraph(data, title) {
+      G = { nodes: data.nodes || [], edges: data.edges || [] };
+      els.graphTitle.textContent = title;
+      pos = layout(G.nodes, G.edges);
+      resetView();
+      render();
+    }
+    async function showAll() {
+      setActiveFolder(null);
+      setGraph(await api("GET", "/api/memory/graph"), "Весь граф");
+    }
+    async function focusTopic(id, name) {
+      setActiveFolder(id);
+      setGraph(await api("GET", `/api/memory/topics/${id}/subgraph`), name);
+    }
+
+    /* ── Folders (Topic) ── */
+    let activeFolder = null;
+    function setActiveFolder(id) {
+      activeFolder = id;
+      els.folderList.querySelectorAll(".mem-folder").forEach((el) => {
+        el.classList.toggle("active", el.dataset.id === String(id) || (id === null && el.dataset.all === "1"));
+      });
+    }
+    async function loadFolders() {
+      const topics = await api("GET", "/api/memory/nodes?type=Topic");
+      els.folderList.innerHTML = "";
+      const all = document.createElement("button");
+      all.className = "mem-folder active";
+      all.dataset.all = "1";
+      all.innerHTML = `<span class="mem-folder-dot" style="background:var(--ink-2)"></span><span>Весь граф</span>`;
+      all.onclick = showAll;
+      els.folderList.appendChild(all);
+      if (!topics.length) {
+        const e = document.createElement("div");
+        e.className = "mem-empty-mini";
+        e.textContent = "Тем пока нет";
+        els.folderList.appendChild(e);
+        return;
+      }
+      for (const t of topics) {
+        const b = document.createElement("button");
+        b.className = "mem-folder";
+        b.dataset.id = t.id;
+        b.innerHTML = `<span class="mem-folder-dot" style="background:${colorOf("Topic")}"></span><span>${t.name}</span>`;
+        b.onclick = () => focusTopic(t.id, t.name);
+        els.folderList.appendChild(b);
+      }
+    }
+
+    /* ── Legend ── */
+    function buildLegend() {
+      els.legend.innerHTML = Object.entries(TYPE_COLORS).map(([t, c]) =>
+        `<span class="mem-leg"><span class="mem-leg-dot" style="background:${c}"></span>${t}</span>`
+      ).join("");
+    }
+
+    /* ── Dossier ── */
+    function row(k, v) {
+      return `<div class="mem-kv-row"><span class="mem-kv-k">${k}</span><span class="mem-kv-v">${v}</span></div>`;
+    }
+    async function openDossier(id) {
+      const res = await api("GET", `/api/memory/nodes/${id}`);
+      if (!res || !res.node) return;
+      const n = res.node;
+      const col = colorOf(n.type);
+      const pill = document.getElementById("dos-type");
+      pill.textContent = n.type;
+      pill.style.color = col; pill.style.borderColor = col;
+      document.getElementById("dos-name").textContent = n.name;
+      document.getElementById("dos-name").style.color = col;
+      document.getElementById("dos-basis").textContent = n.basis || "";
+
+      const attrs = n.attributes || {};
+      const ak = Object.keys(attrs);
+      document.getElementById("dos-attrs").innerHTML =
+        ak.length ? ak.map((k) => row(k, attrs[k])).join("") : `<div class="mem-empty-mini">нет</div>`;
+
+      document.getElementById("dos-meta").innerHTML =
+        row("confidence", (n.confidence ?? "").toString()) +
+        row("origin", n.origin || "—") +
+        row("status", n.status || "—") +
+        row("создан", n.created_at ? new Date(n.created_at * 1000).toLocaleString("ru-RU") : "—");
+
+      const sub = res.subgraph || { nodes: [], edges: [] };
+      const byId = Object.fromEntries((sub.nodes || []).map((x) => [x.id, x]));
+      const conns = (sub.edges || []).map((e) => {
+        const out = e.src_id === id;
+        const other = byId[out ? e.dst_id : e.src_id];
+        const oname = other ? other.name : `#${out ? e.dst_id : e.src_id}`;
+        const arrow = out ? "→" : "←";
+        return `<button class="mem-conn" data-id="${out ? e.dst_id : e.src_id}">
+          <span class="mem-conn-type">${e.type}</span>
+          <span class="mem-conn-name">${arrow} ${oname}</span></button>`;
+      });
+      const cc = document.getElementById("dos-conns");
+      cc.innerHTML = conns.length ? conns.join("") : `<div class="mem-empty-mini">нет связей</div>`;
+      cc.querySelectorAll(".mem-conn").forEach((el) =>
+        el.onclick = () => openDossier(parseInt(el.dataset.id, 10)));
+
+      els.dossier.hidden = false;
+    }
+    document.getElementById("dos-close").onclick = () => { els.dossier.hidden = true; };
+    document.getElementById("reset-view").onclick = resetView;
+
+    /* ── Control strip (settings) ── */
+    async function loadControls() {
+      const s = await api("GET", "/api/settings");
+      const read = document.getElementById("ctl-read");
+      const vec = document.getElementById("ctl-vector");
+      const write = document.getElementById("ctl-write");
+      const budget = document.getElementById("ctl-budget");
+      read.checked = s.memory_read_enabled !== "false";
+      vec.checked = s.memory_vector_enabled !== "false";
+      write.checked = s.memory_write_enabled !== "false";
+      budget.value = s.memory_token_budget || "600";
+      read.onchange = () => api("PATCH", "/api/settings", { memory_read_enabled: read.checked ? "true" : "false" });
+      vec.onchange = () => api("PATCH", "/api/settings", { memory_vector_enabled: vec.checked ? "true" : "false" });
+      write.onchange = () => api("PATCH", "/api/settings", { memory_write_enabled: write.checked ? "true" : "false" });
+      let bd;
+      budget.oninput = () => {
+        clearTimeout(bd);
+        bd = setTimeout(() => {
+          const v = parseInt(budget.value, 10);
+          if (v >= 100 && v <= 4000) api("PATCH", "/api/settings", { memory_token_budget: String(v) });
+        }, 500);
+      };
+    }
+
+    /* ── Init ── */
+    buildLegend();
+    loadControls();
+    loadFolders();
+    showAll();
+  </script>
+</body>
+</html>

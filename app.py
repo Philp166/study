@@ -66,7 +66,7 @@ AUTH_TTL = 60 * 60 * 6  # срок жизни токена — 6 часов (с�
 # через /api после ввода пароля) + статика для отрисовки оверлёя входа + health-check.
 # Всё остальное (/api/*, стримы) требует валидный Bearer-токен.
 PUBLIC_PATHS = {
-    "/", "/voice", "/settings",
+    "/", "/voice", "/settings", "/memory",
     "/login", "/healthz", "/favicon.ico",
     "/styles.css", "/agent.js", "/auth-gate.js",
 }
@@ -785,6 +785,11 @@ def voice_page():
 @app.get("/settings")
 def settings_page():
     return FileResponse(BASE_DIR / "settings.html")
+
+
+@app.get("/memory")
+def memory_page():
+    return FileResponse(BASE_DIR / "memory.html")
 
 
 @app.post("/voice/chat/stream")

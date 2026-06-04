@@ -1049,7 +1049,10 @@ _SETTING_DEFAULTS = {
     "voice_enabled": "true",
     "memory_read_enabled": "true",
     "memory_token_budget": "600",
-    "memory_vector_enabled": "true",
+    # По умолчанию ВЫКЛ: загрузка локальной модели эмбеддингов (~150 МБ) тяжела
+    # для Render free-tier и в read-пути подвесила бы первый запрос. Включается
+    # тумблером «Вектор» на экране /memory, когда подтверждён запас памяти.
+    "memory_vector_enabled": "false",
     "memory_write_enabled": "true",
 }
 
