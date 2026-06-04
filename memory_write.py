@@ -24,23 +24,30 @@ log = logging.getLogger("cos.memory.write")
 EXTRACTOR_MODEL = "claude-haiku-4-5"
 GRAPH_CONTEXT_LIMIT = 15
 
-_CMD_RE = re.compile(r"^\s*/?запомни(?:те|ть)?\b[\s:,\-—]*", re.IGNORECASE)
-_EMPTY_POINTERS = {"", "это", "этот", "вот это", "это сообщение", "такое", "вот"}
+# Слово-команда «запомни/запомнить/запомните» — В ЛЮБОМ месте сообщения.
+_CMD_RE = re.compile(r"\bзапомни(?:те|ть)?\b", re.IGNORECASE)
+_EMPTY_POINTERS = {"", "это", "этот", "вот это", "это сообщение", "такое", "вот",
+                   "запиши", "сохрани"}
 
 
 # ── Команда «запомни …» ──
 
 def parse_remember_command(text: str) -> tuple[bool, str | None]:
-    """(is_command, content). content=None → «запомни это» (помним предыдущее сообщение)."""
+    """(is_command, content). Команда срабатывает, если слово «запомни» есть где угодно.
+
+    content — остаток сообщения без слова-команды (факты обычно в том же
+    сообщении: «… двое детей, запомни»). Если остаток пустой или это указатель
+    («запомни это») → content=None, помним предыдущее сообщение ассистента.
+    """
     if not text:
         return False, None
-    m = _CMD_RE.match(text)
+    m = _CMD_RE.search(text)
     if not m:
         return False, None
-    content = text[m.end():].strip()
-    if content.lower() in _EMPTY_POINTERS:
-        content = None
-    return True, content
+    rest = (text[:m.start()] + " " + text[m.end():]).strip(" ,.:;—-\n\t\r")
+    if rest.lower() in _EMPTY_POINTERS or len(rest) < 3:
+        return True, None
+    return True, rest
 
 
 # ── Граф-контекст для дедупа ──
