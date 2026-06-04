@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -13,10 +14,12 @@ BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
 import edge_tts
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 log = logging.getLogger("cos.branch")
 
@@ -35,6 +38,63 @@ cos_agent = Agent(client)
 db.init_db()
 
 app = FastAPI()
+
+# ── HTTP Basic Auth на всё приложение ──
+# Пароль берётся ТОЛЬКО из переменной окружения (никогда не из кода/БД/.env-в-репо).
+# Нет переменной → auth выключен (удобно для локальной разработки).
+# Есть → каждый запрос требует пароль, кроме health-check и служебных путей.
+SITE_PASSWORD = os.getenv("SITE_PASSWORD")
+
+# Пути, которые НИКОГДА не требуют пароль.
+# /healthz пингует Render — под паролем сервис считался бы упавшим.
+AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico"}
+
+if not SITE_PASSWORD:
+    logging.warning(
+        "SITE_PASSWORD не задан — Basic Auth ОТКЛЮЧЁН, сайт открыт без пароля. "
+        "Это нормально для локальной разработки. На проде задай SITE_PASSWORD "
+        "в переменных окружения (например, в дашборде Render)."
+    )
+
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    """Требует HTTP Basic Auth на всех роутах разом (страницы, API, статика, SSE).
+
+    Username не проверяется (любой), сверяется только пароль — через
+    secrets.compare_digest (защита от timing-атак). Middleware НЕ читает и НЕ
+    буферизует тело ответа: при успехе просто возвращает результат call_next,
+    поэтому StreamingResponse / SSE проходит чанками без изменений.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Auth выключен (нет пароля) — пропускаем всё.
+        if not SITE_PASSWORD:
+            return await call_next(request)
+
+        # CORS preflight (браузер шлёт его без credentials) и исключённые пути.
+        if request.method == "OPTIONS" or request.url.path in AUTH_EXEMPT_PATHS:
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth[6:]).decode("utf-8")
+                _, _, password = decoded.partition(":")
+            except Exception:
+                password = ""
+            if secrets.compare_digest(password, SITE_PASSWORD):
+                return await call_next(request)
+
+        # Нет/неверный пароль — браузер покажет окно ввода логина/пароля.
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="CoS"'},
+        )
+
+
+# Регистрируем ДО CORS, чтобы CORS остался внешним middleware:
+# тогда preflight и CORS-заголовки (в т.ч. на ответе 401) работают корректно.
+app.add_middleware(BasicAuthMiddleware)
 
 _origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 if _origins:
@@ -177,6 +237,13 @@ class MigrateChat(BaseModel):
 
 class MigrateRequest(BaseModel):
     chats: list[MigrateChat]
+
+
+# ── Health-check (без пароля — пингует Render) ──
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 
 # ── Pages ──
