@@ -1213,11 +1213,21 @@ body.memory-page { display: flex; flex-direction: column; height: 100%; overflow
   text-anchor: middle; pointer-events: none; letter-spacing: .04em;
 }
 .mem-node { cursor: pointer; }
-.mem-node-shape { stroke-width: 1.4; transition: filter .15s; }
-.mem-node:hover .mem-node-shape { filter: url(#glow); }
+.mem-node-glow {
+  pointer-events: none; opacity: .16;
+  transform-box: fill-box; transform-origin: center;
+  animation: mem-pulse 3.4s ease-in-out infinite;
+}
+.mem-node-dot { stroke-width: 1.4; pointer-events: all; transition: filter .15s; }
+.mem-node:hover .mem-node-dot { filter: url(#glow); }
 .mem-node-label {
   font-family: var(--f-mono); font-size: 11px; pointer-events: none;
-  letter-spacing: .01em;
+  letter-spacing: .01em; opacity: 0; transition: opacity .15s;
+}
+.mem-node:hover .mem-node-label { opacity: 1; }
+@keyframes mem-pulse {
+  0%, 100% { opacity: .10; transform: scale(.8); }
+  50%      { opacity: .40; transform: scale(1.18); }
 }
 
 .mem-empty {

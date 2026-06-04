@@ -221,60 +221,78 @@
     }
     function resetView() { view = { tx: 0, ty: 0, s: 1 }; applyView(); }
 
-    function nodeWidth(name) {
-      return Math.max(54, Math.min(220, (name || "").length * 8.2 + 26));
-    }
+    /* Узлы — светящиеся точки; имя по наведению; непрерывный дрейф + пульсация. */
+    const NODE_R = 6, GLOW_R = 13, FLOAT_AMP = 5;
+    let nodeEls = [], edgeEls = [], anim = {}, dragId = null, rafId = null;
+    const ns = (t) => document.createElementNS(SVGNS, t);
 
     function render() {
       els.gEdges.innerHTML = "";
       els.gEdgeLabels.innerHTML = "";
       els.gNodes.innerHTML = "";
-      const byId = Object.fromEntries(G.nodes.map((n) => [n.id, n]));
+      nodeEls = []; edgeEls = []; anim = {};
 
       for (const e of G.edges) {
-        const A = pos[e.src_id], B = pos[e.dst_id];
-        if (!A || !B) continue;
-        const line = document.createElementNS(SVGNS, "line");
-        line.setAttribute("x1", A.x); line.setAttribute("y1", A.y);
-        line.setAttribute("x2", B.x); line.setAttribute("y2", B.y);
-        line.setAttribute("class", "mem-edge");
+        if (!pos[e.src_id] || !pos[e.dst_id]) continue;
+        const line = ns("line"); line.setAttribute("class", "mem-edge");
         els.gEdges.appendChild(line);
-        const lbl = document.createElementNS(SVGNS, "text");
-        lbl.setAttribute("x", (A.x + B.x) / 2);
-        lbl.setAttribute("y", (A.y + B.y) / 2 - 3);
-        lbl.setAttribute("class", "mem-edge-label");
-        lbl.textContent = e.type;
-        els.gEdgeLabels.appendChild(lbl);
+        const lbl = ns("text"); lbl.setAttribute("class", "mem-edge-label");
+        lbl.textContent = e.type; els.gEdgeLabels.appendChild(lbl);
+        edgeEls.push({ line, lbl, s: e.src_id, d: e.dst_id });
       }
 
       for (const n of G.nodes) {
-        const P = pos[n.id];
-        if (!P) continue;
+        if (!pos[n.id]) continue;
         const col = colorOf(n.type);
-        const w = nodeWidth(n.name), h = 30, c = 7;
-        const g = document.createElementNS(SVGNS, "g");
-        g.setAttribute("class", "mem-node");
-        g.setAttribute("transform", `translate(${P.x} ${P.y})`);
-        g.dataset.id = n.id;
-        const poly = document.createElementNS(SVGNS, "polygon");
-        const x0 = -w / 2, y0 = -h / 2;
-        poly.setAttribute("points",
-          `${x0 + c},${y0} ${x0 + w},${y0} ${x0 + w},${y0 + h - c} ${x0 + w - c},${y0 + h} ${x0},${y0 + h} ${x0},${y0 + c}`);
-        poly.setAttribute("class", "mem-node-shape");
-        poly.style.stroke = col;
-        poly.style.fill = "rgba(10,10,31,.92)";
-        const txt = document.createElementNS(SVGNS, "text");
-        txt.setAttribute("class", "mem-node-label");
-        txt.setAttribute("text-anchor", "middle");
-        txt.setAttribute("dy", "0.34em");
-        txt.style.fill = col;
-        txt.textContent = n.name;
-        g.appendChild(poly); g.appendChild(txt);
+        const g = ns("g"); g.setAttribute("class", "mem-node"); g.dataset.id = n.id;
+        const glow = ns("circle"); glow.setAttribute("class", "mem-node-glow");
+        glow.setAttribute("r", GLOW_R); glow.style.fill = col;
+        glow.style.animationDelay = (-Math.random() * 4).toFixed(2) + "s";
+        const dot = ns("circle"); dot.setAttribute("class", "mem-node-dot");
+        dot.setAttribute("r", NODE_R); dot.style.fill = col; dot.style.stroke = col;
+        const txt = ns("text"); txt.setAttribute("class", "mem-node-label");
+        txt.setAttribute("text-anchor", "middle"); txt.setAttribute("dy", NODE_R + 15);
+        txt.style.fill = col; txt.textContent = n.name;
+        g.appendChild(glow); g.appendChild(dot); g.appendChild(txt);
         els.gNodes.appendChild(g);
+        anim[n.id] = { ph: Math.random() * 6.28, spd: 0.4 + Math.random() * 0.5,
+                       amp: FLOAT_AMP * (0.6 + Math.random() * 0.8) };
+        nodeEls.push({ g, id: n.id });
         bindNode(g, n.id);
       }
       els.empty.hidden = G.nodes.length > 0;
       els.stat.textContent = `${G.nodes.length} узлов · ${G.edges.length} связей`;
+      startAnim();
+    }
+
+    function dispPos(id, t) {
+      const b = pos[id], a = anim[id];
+      if (!b) return null;
+      if (dragId === id || !a) return b;
+      return { x: b.x + Math.sin(t * a.spd + a.ph) * a.amp,
+               y: b.y + Math.cos(t * a.spd * 0.9 + a.ph) * a.amp };
+    }
+
+    function startAnim() {
+      if (rafId) return;
+      const step = (ts) => {
+        const t = ts / 1000, P = {};
+        for (const ne of nodeEls) {
+          const p = dispPos(ne.id, t); if (!p) continue;
+          P[ne.id] = p;
+          ne.g.setAttribute("transform", `translate(${p.x} ${p.y})`);
+        }
+        for (const ee of edgeEls) {
+          const A = P[ee.s] || pos[ee.s], B = P[ee.d] || pos[ee.d];
+          if (!A || !B) continue;
+          ee.line.setAttribute("x1", A.x); ee.line.setAttribute("y1", A.y);
+          ee.line.setAttribute("x2", B.x); ee.line.setAttribute("y2", B.y);
+          ee.lbl.setAttribute("x", (A.x + B.x) / 2);
+          ee.lbl.setAttribute("y", (A.y + B.y) / 2 - 4);
+        }
+        rafId = requestAnimationFrame(step);
+      };
+      rafId = requestAnimationFrame(step);
     }
 
     /* ── Node drag + click ── */
@@ -282,23 +300,20 @@
       let down = null, moved = false;
       g.addEventListener("pointerdown", (ev) => {
         ev.stopPropagation();
-        down = { x: ev.clientX, y: ev.clientY };
-        moved = false;
+        down = { x: ev.clientX, y: ev.clientY }; moved = false; dragId = id;
         g.setPointerCapture(ev.pointerId);
       });
       g.addEventListener("pointermove", (ev) => {
         if (!down) return;
         if (Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 4) moved = true;
         const r = els.field.getBoundingClientRect();
-        const scaleX = W / r.width, scaleY = H / r.height;
-        pos[id].x = (ev.clientX - r.left) * scaleX / view.s - view.tx / view.s;
-        pos[id].y = (ev.clientY - r.top) * scaleY / view.s - view.ty / view.s;
-        render();
+        pos[id].x = (ev.clientX - r.left) * (W / r.width) / view.s - view.tx / view.s;
+        pos[id].y = (ev.clientY - r.top) * (H / r.height) / view.s - view.ty / view.s;
       });
       g.addEventListener("pointerup", (ev) => {
         g.releasePointerCapture(ev.pointerId);
         if (!moved) openDossier(id);
-        down = null;
+        down = null; dragId = null;
       });
     }
 
