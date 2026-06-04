@@ -54,7 +54,11 @@ app = FastAPI()
 SITE_PASSWORD = os.getenv("SITE_PASSWORD")
 
 AUTH_COOKIE = "cos_auth"
-AUTH_MAX_AGE = 60 * 60 * 24 * 30  # срок жизни сессии — 30 дней
+# Cookie делаем СЕССИОННОЙ (без max_age) — браузер стирает её при закрытии,
+# поэтому при следующем заходе на сайт пароль спрашивается заново.
+# AUTH_TTL — срок жизни самого подписанного токена (страховка, даже если
+# браузер не закрывали): по истечении пароль попросят снова.
+AUTH_TTL = 60 * 60 * 6  # 6 часов
 
 # Пути, доступные без входа: health-check (его пингует Render — под паролем
 # сервис считался бы упавшим), favicon и сама страница входа/выхода.
@@ -71,7 +75,7 @@ if not SITE_PASSWORD:
 def _make_auth_token() -> str:
     """Подписанный токен сессии вида `<expiry>.<hmac>`. Ключ подписи — сам пароль,
     поэтому смена SITE_PASSWORD автоматически инвалидирует все старые сессии."""
-    expiry = str(int(time.time()) + AUTH_MAX_AGE)
+    expiry = str(int(time.time()) + AUTH_TTL)
     sig = hmac.new(SITE_PASSWORD.encode(), expiry.encode(), hashlib.sha256).hexdigest()
     return f"{expiry}.{sig}"
 
@@ -459,9 +463,10 @@ def login_submit(req: LoginRequest):
         return JSONResponse({"ok": True})
     if secrets.compare_digest(req.password, SITE_PASSWORD):
         resp = JSONResponse({"ok": True})
+        # Без max_age/expires → сессионная cookie: исчезает при закрытии браузера.
         resp.set_cookie(
             AUTH_COOKIE, _make_auth_token(),
-            max_age=AUTH_MAX_AGE, httponly=True, samesite="lax",
+            httponly=True, samesite="lax",
         )
         return resp
     return JSONResponse({"ok": False, "error": "wrong_password"}, status_code=401)
