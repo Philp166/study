@@ -277,48 +277,138 @@ def healthz():
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Вход</title>
+  <title>CoS // ДОСТУП</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    * { box-sizing: border-box; }
+    :root {
+      --bg-0:#050614; --bg-1:#0a0a1f; --bg-2:#0f1030; --line:#1f2160; --line-2:#2a2d7a;
+      --cyan:#00f0ff; --cyan-dim:#0090a0; --magenta:#ff2e63; --violet:#6b5cff;
+      --ink-0:#e8e9ff; --ink-1:#aab0e0; --ink-2:#6e74a8; --ink-3:#3e4380;
+      --f-display:"Space Grotesk","Inter",ui-sans-serif,sans-serif;
+      --f-mono:"JetBrains Mono",ui-monospace,monospace;
+      --scan-opacity:.18;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    html, body { height:100%; }
     body {
-      margin: 0; min-height: 100vh; display: flex;
-      align-items: center; justify-content: center;
-      background: #0f1115; color: #e8e8ea;
-      font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      font-family:var(--f-display); color:var(--ink-0);
+      background:
+        radial-gradient(1200px 800px at 20% 10%, rgba(107,92,255,.10), transparent 60%),
+        radial-gradient(900px 700px at 90% 80%, rgba(0,240,255,.06), transparent 65%),
+        var(--bg-0);
+      display:flex; align-items:center; justify-content:center;
+      overflow:hidden; position:relative;
     }
-    .card {
-      width: 100%; max-width: 360px; padding: 32px;
-      background: #1a1d24; border: 1px solid #2a2e38; border-radius: 14px;
-      box-shadow: 0 12px 40px rgba(0,0,0,.4);
+    input { font:inherit; color:inherit; background:none; border:0; outline:0; }
+    button { font:inherit; color:inherit; background:none; border:0; cursor:pointer; }
+
+    /* CRT / vignette */
+    .crt-overlay { position:fixed; inset:0; pointer-events:none; z-index:9999; mix-blend-mode:overlay; }
+    .crt-overlay::before {
+      content:""; position:absolute; inset:0;
+      background:repeating-linear-gradient(to bottom,
+        transparent 0px, transparent 2px,
+        rgba(0,0,0,var(--scan-opacity)) 2px, rgba(0,0,0,var(--scan-opacity)) 3px);
     }
-    h1 { margin: 0 0 4px; font-size: 20px; }
-    p { margin: 0 0 20px; color: #9aa0ab; font-size: 14px; }
-    input {
-      width: 100%; padding: 12px 14px; font-size: 15px;
-      background: #0f1115; color: #e8e8ea;
-      border: 1px solid #2a2e38; border-radius: 9px; outline: none;
+    .vignette {
+      position:fixed; inset:0; pointer-events:none; z-index:9998;
+      background:radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,.6) 100%);
     }
-    input:focus { border-color: #5b8cff; }
-    button {
-      width: 100%; margin-top: 12px; padding: 12px 14px; font-size: 15px;
-      font-weight: 600; color: #fff; cursor: pointer;
-      background: #5b8cff; border: none; border-radius: 9px;
+
+    /* Panel with angular cut */
+    .panel-cut {
+      --c:14px; position:relative; padding:1px; width:100%; max-width:380px;
+      background:linear-gradient(135deg, var(--line-2), var(--line) 40%, var(--line-2));
+      clip-path:polygon(var(--c) 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%, 0 var(--c));
+      z-index:1;
     }
-    button:hover { background: #4a7bf0; }
-    button:disabled { opacity: .6; cursor: default; }
-    .err { margin-top: 12px; color: #ff6b6b; font-size: 14px; min-height: 18px; }
+    .panel-inner {
+      background:linear-gradient(180deg, rgba(15,16,48,.94), rgba(10,10,31,.94));
+      clip-path:polygon(var(--c) 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%, 0 var(--c));
+      padding:34px 30px 30px;
+    }
+
+    /* Runline */
+    @keyframes runline-x { 0% { transform:translateX(-100%) } 100% { transform:translateX(100%) } }
+    .runline { position:absolute; left:0; right:0; top:0; height:1px; overflow:hidden;
+      background:linear-gradient(90deg, transparent, var(--cyan), transparent); opacity:.6; }
+    .runline::after { content:""; position:absolute; inset:0;
+      background:linear-gradient(90deg, transparent 0%, var(--cyan) 50%, transparent 100%);
+      animation:runline-x 3.6s linear infinite; }
+
+    /* Brand + glitch */
+    .brand { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
+    @keyframes flicker-text { 0%,96%,100% { opacity:1 } 97% { opacity:.55 } 98% { opacity:1 } 99% { opacity:.7 } }
+    .title {
+      font-weight:700; font-size:26px; letter-spacing:.04em; position:relative;
+      display:inline-block; animation:flicker-text 5.4s infinite;
+    }
+    .title::before, .title::after {
+      content:attr(data-text); position:absolute; left:0; top:0; width:100%;
+      pointer-events:none; mix-blend-mode:screen;
+    }
+    .title::before { color:var(--magenta); transform:translate(1.2px,0); clip-path:inset(0 0 60% 0); opacity:.85; }
+    .title::after  { color:var(--cyan);    transform:translate(-1.2px,0); clip-path:inset(58% 0 0 0); opacity:.85; }
+    .sub { font-family:var(--f-mono); font-size:10px; color:var(--ink-2); letter-spacing:.06em; }
+
+    .hud { font-family:var(--f-mono); font-size:10px; color:var(--ink-2);
+      letter-spacing:.14em; text-transform:uppercase; margin:18px 0 8px; }
+
+    /* Input */
+    .field { position:relative; }
+    .field input {
+      width:100%; padding:12px 14px; font-family:var(--f-mono); font-size:13px;
+      letter-spacing:.04em; background:rgba(5,6,20,.8); color:var(--ink-0);
+      border:1px solid var(--line-2);
+      clip-path:polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+      transition:border-color .15s, box-shadow .15s;
+    }
+    .field input::placeholder { color:var(--ink-3); }
+    .field input:focus { border-color:var(--cyan); box-shadow:0 0 20px rgba(0,240,255,.18); }
+
+    /* Button */
+    .btn-primary {
+      width:100%; margin-top:14px; padding:11px 16px;
+      font-family:var(--f-mono); font-size:11px; font-weight:600;
+      letter-spacing:.12em; text-transform:uppercase;
+      background:var(--cyan); color:#021016; border:1px solid var(--cyan);
+      clip-path:polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+      box-shadow:0 0 18px rgba(0,240,255,.35);
+      transition:background .15s, box-shadow .15s;
+    }
+    .btn-primary:hover { background:#5cf8ff; box-shadow:0 0 30px rgba(0,240,255,.6); }
+    .btn-primary:disabled { opacity:.55; cursor:default; box-shadow:none; }
+
+    .err {
+      margin-top:12px; min-height:16px; font-family:var(--f-mono); font-size:11px;
+      letter-spacing:.04em; color:var(--magenta); text-shadow:0 0 8px rgba(255,46,99,.5);
+    }
   </style>
 </head>
 <body>
-  <form class="card" id="f">
-    <h1>Вход</h1>
-    <p>Введите пароль, чтобы продолжить.</p>
-    <input type="password" id="pwd" placeholder="Пароль" autofocus autocomplete="current-password">
-    <button type="submit" id="btn">Войти</button>
-    <div class="err" id="err"></div>
+  <div class="crt-overlay"></div>
+  <div class="vignette"></div>
+
+  <form class="panel-cut" id="f">
+    <div class="panel-inner">
+      <div class="runline"></div>
+      <div class="brand">
+        <span class="title" data-text="ШТАБ">ШТАБ</span>
+        <span class="sub">// CHIEF.OF.STAFF</span>
+      </div>
+      <div class="hud">[ ДОСТУП ОГРАНИЧЕН // ENTER PASSCODE ]</div>
+      <div class="field">
+        <input type="password" id="pwd" placeholder="• • • • • • • •" autofocus autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn-primary" id="btn">Войти →</button>
+      <div class="err" id="err"></div>
+    </div>
   </form>
+
   <script>
     const f = document.getElementById('f');
     const pwd = document.getElementById('pwd');
@@ -337,11 +427,11 @@ LOGIN_HTML = """<!DOCTYPE html>
         if (res.ok) {
           window.location.replace('/');
         } else {
-          err.textContent = 'Неверный пароль';
+          err.textContent = '> ОТКАЗ: неверный пароль';
           pwd.select();
         }
       } catch (_) {
-        err.textContent = 'Ошибка сети, попробуйте ещё раз';
+        err.textContent = '> ОШИБКА СЕТИ — повторите';
       } finally {
         btn.disabled = false;
       }
