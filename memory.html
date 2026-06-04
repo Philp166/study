@@ -36,10 +36,6 @@
       <label class="wakeword-switch"><input type="checkbox" id="ctl-read" /><span class="wakeword-slider"></span></label>
     </div>
     <div class="mem-ctl">
-      <span class="t-hud">Вектор</span>
-      <label class="wakeword-switch"><input type="checkbox" id="ctl-vector" /><span class="wakeword-slider"></span></label>
-    </div>
-    <div class="mem-ctl">
       <span class="t-hud">Запись</span>
       <label class="wakeword-switch"><input type="checkbox" id="ctl-write" /><span class="wakeword-slider"></span></label>
     </div>
@@ -456,15 +452,12 @@
     async function loadControls() {
       const s = await api("GET", "/api/settings");
       const read = document.getElementById("ctl-read");
-      const vec = document.getElementById("ctl-vector");
       const write = document.getElementById("ctl-write");
       const budget = document.getElementById("ctl-budget");
       read.checked = s.memory_read_enabled !== "false";
-      vec.checked = s.memory_vector_enabled !== "false";
       write.checked = s.memory_write_enabled !== "false";
       budget.value = s.memory_token_budget || "600";
       read.onchange = () => api("PATCH", "/api/settings", { memory_read_enabled: read.checked ? "true" : "false" });
-      vec.onchange = () => api("PATCH", "/api/settings", { memory_vector_enabled: vec.checked ? "true" : "false" });
       write.onchange = () => api("PATCH", "/api/settings", { memory_write_enabled: write.checked ? "true" : "false" });
       let bd;
       budget.oninput = () => {

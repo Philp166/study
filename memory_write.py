@@ -1,16 +1,13 @@
 """
 Путь ЗАПИСИ долговременной памяти (оркестратор).
 
-Поток: content → построить graph_context (имя + вектор, для дедупа) → субагент-
+Поток: content → построить graph_context (поиск по имени, для дедупа) → субагент-
 экстрактор (Haiku) возвращает JSON → валидируем → применяем порог confidence →
-пишем узлы/рёбра через db (валидатор пар страхует) → конфликты в supersedes →
-сам content кладём в слой знания чанками. Экстрактор сам в граф НЕ пишет.
+пишем узлы/рёбра через db (валидатор пар страхует) → конфликты в supersedes.
+Экстрактор сам в граф НЕ пишет.
 
-Фаза 2: запуск только вручную (команда «запомни …», mode=on_request, порог ≥0.5).
-Фаза 4 (позже): автоматические чекпоинты, mode=background (≥0.8), очередь suggestions.
-
-Запускается из BackgroundTasks — диалог не блокируется. Любой сбой логируется и
-гасится, чтобы фон не уронил запрос.
+Запуск только вручную (команда «запомни …», mode=on_request, порог ≥0.5) из
+BackgroundTasks — диалог не блокируется. Любой сбой логируется и гасится.
 """
 
 import json
@@ -18,7 +15,6 @@ import logging
 import re
 
 import db
-import embeddings
 import memory
 import memory_schema
 from prompts.memory_extractor import MEMORY_EXTRACTOR_SYSTEM_PROMPT
@@ -27,7 +23,6 @@ log = logging.getLogger("cos.memory.write")
 
 EXTRACTOR_MODEL = "claude-haiku-4-5"
 GRAPH_CONTEXT_LIMIT = 15
-CHUNK_MAX_LEN = 900
 
 _CMD_RE = re.compile(r"^\s*/?запомни(?:те|ть)?\b[\s:,\-—]*", re.IGNORECASE)
 _EMPTY_POINTERS = {"", "это", "этот", "вот это", "это сообщение", "такое", "вот"}
@@ -48,75 +43,10 @@ def parse_remember_command(text: str) -> tuple[bool, str | None]:
     return True, content
 
 
-# ── Эмбеддинги узлов/чанков ──
-
-def _node_embed_text(node_type: str, name: str, basis: str, attributes: dict) -> str:
-    parts = [name]
-    if basis:
-        parts.append(basis)
-    if attributes:
-        parts.append(" ".join(f"{k}: {v}" for k, v in attributes.items()))
-    return f"{node_type}: " + " | ".join(parts)
-
-
-def _node_embedding(node_type, name, basis, attributes) -> bytes | None:
-    if not memory._vector_enabled():
-        return None
-    vec = embeddings.embed_one(_node_embed_text(node_type, name, basis, attributes or {}))
-    return embeddings.to_blob(vec) if vec else None
-
-
-def index_node(node_id: int) -> None:
-    """Пересчитать и сохранить эмбеддинг узла (для ручного API; в фоне)."""
-    node = db.get_node(node_id)
-    if not node:
-        return
-    blob = _node_embedding(node["type"], node["name"],
-                           node.get("basis", ""), node.get("attributes") or {})
-    if blob is not None:
-        db.set_node_embedding(node_id, blob)
-
-
-def _split_text(text: str) -> list[str]:
-    text = (text or "").strip()
-    if len(text) <= CHUNK_MAX_LEN:
-        return [text] if text else []
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks, cur = [], ""
-    for s in sentences:
-        if cur and len(cur) + len(s) + 1 > CHUNK_MAX_LEN:
-            chunks.append(cur.strip())
-            cur = s
-        else:
-            cur = f"{cur} {s}".strip()
-    if cur:
-        chunks.append(cur.strip())
-    return chunks or [text[:CHUNK_MAX_LEN]]
-
-
-def _store_chunks(content, chat_id, message_id, origin) -> int:
-    n = 0
-    for piece in _split_text(content):
-        vec = embeddings.embed_one(piece) if memory._vector_enabled() else None
-        blob = embeddings.to_blob(vec) if vec else None
-        db.create_chunk(piece, embedding=blob, origin=origin,
-                        source_chat_id=chat_id, source_message_id=message_id)
-        n += 1
-    return n
-
-
 # ── Граф-контекст для дедупа ──
 
 def _build_graph_context(content: str) -> list[dict]:
-    ctx: dict[int, dict] = {n["id"]: n for n in memory._find_name_seeds(content)}
-    if memory._vector_enabled():
-        qv = embeddings.embed_one(content)
-        if qv is not None:
-            for nid in memory._rank_ids(qv, db.get_node_vectors(), 10):
-                if nid not in ctx:
-                    n = db.get_node(nid)
-                    if n:
-                        ctx[nid] = n
+    ctx = {n["id"]: n for n in memory._find_name_seeds(content)}
     items = list(ctx.values())[:GRAPH_CONTEXT_LIMIT]
     return [{"id": n["id"], "type": n["type"], "name": n["name"],
              "basis": n.get("basis", "")} for n in items]
@@ -188,14 +118,11 @@ def _apply(data, *, chat_id, message_id, mode, threshold) -> dict:
                 ref_to_id[ref] = n["id"]
             continue
         if float(n.get("confidence", 0)) < threshold:
-            continue  # ниже порога — в фазе 4 уйдёт в suggestions; сейчас пропускаем
-        attrs = n.get("attributes") or {}
-        basis = n.get("basis", "")
+            continue  # ниже порога — пропускаем
         nid = db.create_node(
-            ntype, name, attributes=attrs, origin=mode, basis=basis,
-            confidence=float(n.get("confidence", 0)),
+            ntype, name, attributes=n.get("attributes") or {}, origin=mode,
+            basis=n.get("basis", ""), confidence=float(n.get("confidence", 0)),
             source_chat_id=chat_id, source_message_id=message_id,
-            embedding=_node_embedding(ntype, name, basis, attrs),
         )
         created_nodes += 1
         if ref:
@@ -248,16 +175,15 @@ def remember(client, content: str, *, chat_id: str | None = None,
     threshold = 0.5 if mode == "on_request" else 0.8
     try:
         if not content or not content.strip():
-            return {"nodes": 0, "edges": 0, "conflicts": 0, "suggestions": 0, "chunks": 0}
+            return {"nodes": 0, "edges": 0, "conflicts": 0, "suggestions": 0}
         graph_context = _build_graph_context(content)
         data = _run_extractor(client, content, mode, graph_context)
         result = {"nodes": 0, "edges": 0, "conflicts": 0, "suggestions": 0}
         if data:
             result = _apply(data, chat_id=chat_id, message_id=message_id,
                             mode=mode, threshold=threshold)
-        result["chunks"] = _store_chunks(content, chat_id, message_id, mode)
         log.info("memory write (%s): %s", mode, result)
         return result
     except Exception:
         log.exception("memory write: оркестратор упал (content=%.80r)", content)
-        return {"nodes": 0, "edges": 0, "conflicts": 0, "suggestions": 0, "chunks": 0}
+        return {"nodes": 0, "edges": 0, "conflicts": 0, "suggestions": 0}

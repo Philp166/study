@@ -432,7 +432,7 @@ def api_get_settings():
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
     allowed = {"tts_voice", "voice_enabled", "memory_read_enabled",
-               "memory_token_budget", "memory_vector_enabled", "memory_write_enabled"}
+               "memory_token_budget", "memory_write_enabled"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -535,7 +535,7 @@ def api_memory_list_nodes(type: str | None = None, q: str | None = None):
 
 
 @app.post("/api/memory/nodes")
-def api_memory_create_node(req: MemNodeCreate, background_tasks: BackgroundTasks):
+def api_memory_create_node(req: MemNodeCreate):
     ok, reason = memory_schema.validate_node_type(req.type)
     if not ok:
         return JSONResponse(status_code=400, content={"error": reason})
@@ -543,8 +543,6 @@ def api_memory_create_node(req: MemNodeCreate, background_tasks: BackgroundTasks
         req.type, req.name, attributes=req.attributes,
         basis=req.basis, confidence=req.confidence, origin="manual",
     )
-    # эмбеддинг считаем в фоне (загрузка модели не должна тормозить ответ)
-    background_tasks.add_task(memory_write.index_node, nid)
     return {"id": nid, "node": db.get_node(nid)}
 
 
@@ -569,14 +567,11 @@ def api_memory_get_node(node_id: int):
 
 
 @app.patch("/api/memory/nodes/{node_id}")
-def api_memory_update_node(node_id: int, req: MemNodeUpdate,
-                           background_tasks: BackgroundTasks):
+def api_memory_update_node(node_id: int, req: MemNodeUpdate):
     if not db.get_node(node_id):
         return JSONResponse(status_code=404, content={"error": "not_found"})
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     db.update_node(node_id, **fields)
-    # имя/основание могли поменяться — пересчитаем эмбеддинг в фоне
-    background_tasks.add_task(memory_write.index_node, node_id)
     return {"node": db.get_node(node_id)}
 
 
