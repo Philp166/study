@@ -17,7 +17,7 @@ BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
 import edge_tts
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -26,7 +26,6 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from pydantic import BaseModel
-from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 
 log = logging.getLogger("cos.branch")
@@ -35,8 +34,6 @@ import anthropic
 
 from agent import Agent
 import db
-import memory_schema
-import memory_write
 import summarizer
 
 if not os.getenv("ANTHROPIC_API_KEY"):
@@ -66,7 +63,7 @@ AUTH_TTL = 60 * 60 * 6  # срок жизни токена — 6 часов (с�
 # через /api после ввода пароля) + статика для отрисовки оверлёя входа + health-check.
 # Всё остальное (/api/*, стримы) требует валидный Bearer-токен.
 PUBLIC_PATHS = {
-    "/", "/voice", "/settings", "/memory",
+    "/", "/voice", "/settings",
     "/login", "/healthz", "/favicon.ico",
     "/styles.css", "/agent.js", "/auth-gate.js",
 }
@@ -272,38 +269,6 @@ class MigrateRequest(BaseModel):
     chats: list[MigrateChat]
 
 
-# ── Долговременная память (граф) ──
-
-class MemNodeCreate(BaseModel):
-    type: str
-    name: str
-    attributes: dict = {}
-    basis: str = ""
-    confidence: float = 1.0
-
-
-class MemNodeUpdate(BaseModel):
-    name: str | None = None
-    attributes: dict | None = None
-    basis: str | None = None
-    confidence: float | None = None
-    status: str | None = None
-
-
-class MemEdgeCreate(BaseModel):
-    src_id: int
-    dst_id: int
-    type: str
-    basis: str = ""
-    confidence: float = 1.0
-
-
-class MemRememberRequest(BaseModel):
-    content: str
-    chat_id: str | None = None
-    message_id: int | None = None
-
-
 # ── Health-check (без пароля — пингует Render) ──
 
 @app.get("/healthz")
@@ -431,8 +396,7 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
-    allowed = {"tts_voice", "voice_enabled", "memory_read_enabled",
-               "memory_token_budget", "memory_write_enabled"}
+    allowed = {"tts_voice", "voice_enabled"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -511,102 +475,6 @@ def api_delete_fact(chat_id: str, fact_id: int):
     return {"ok": True}
 
 
-# ── Долговременная память: ручной граф (Фаза 1) ──
-
-@app.get("/api/memory/schema")
-def api_memory_schema():
-    """Закрытые списки типов узлов/рёбер с допустимыми парами — для фронта."""
-    return memory_schema.schema_summary()
-
-
-@app.get("/api/memory/graph")
-def api_memory_graph():
-    """Весь активный граф — для визуализации на экране памяти."""
-    return db.get_full_graph()
-
-
-@app.get("/api/memory/nodes")
-def api_memory_list_nodes(type: str | None = None, q: str | None = None):
-    if q:
-        return db.find_nodes_by_name(q, node_type=type)
-    if type:
-        return db.get_nodes_by_type(type)
-    return db.get_active_nodes()
-
-
-@app.post("/api/memory/nodes")
-def api_memory_create_node(req: MemNodeCreate):
-    ok, reason = memory_schema.validate_node_type(req.type)
-    if not ok:
-        return JSONResponse(status_code=400, content={"error": reason})
-    nid = db.create_node(
-        req.type, req.name, attributes=req.attributes,
-        basis=req.basis, confidence=req.confidence, origin="manual",
-    )
-    return {"id": nid, "node": db.get_node(nid)}
-
-
-@app.post("/api/memory/remember")
-def api_memory_remember(req: MemRememberRequest, background_tasks: BackgroundTasks):
-    """Ручная запись в память: разбор content экстрактором в фоне (on_request)."""
-    if not req.content.strip():
-        return JSONResponse(status_code=400, content={"error": "empty_content"})
-    background_tasks.add_task(
-        memory_write.remember, client, req.content,
-        chat_id=req.chat_id, message_id=req.message_id, mode="on_request",
-    )
-    return {"ok": True, "scheduled": True}
-
-
-@app.get("/api/memory/nodes/{node_id}")
-def api_memory_get_node(node_id: int):
-    node = db.get_node(node_id)
-    if not node:
-        return JSONResponse(status_code=404, content={"error": "not_found"})
-    return {"node": node, "subgraph": db.get_subgraph(node_id, hops=1)}
-
-
-@app.patch("/api/memory/nodes/{node_id}")
-def api_memory_update_node(node_id: int, req: MemNodeUpdate):
-    if not db.get_node(node_id):
-        return JSONResponse(status_code=404, content={"error": "not_found"})
-    fields = {k: v for k, v in req.model_dump().items() if v is not None}
-    db.update_node(node_id, **fields)
-    return {"node": db.get_node(node_id)}
-
-
-@app.delete("/api/memory/nodes/{node_id}")
-def api_memory_delete_node(node_id: int):
-    """Мягкое удаление (status=inactive)."""
-    db.soft_delete_node(node_id)
-    return {"ok": True}
-
-
-@app.get("/api/memory/topics/{topic_id}/subgraph")
-def api_memory_topic_subgraph(topic_id: int):
-    """Подграф темы (фокус по папке-направлению на экране памяти)."""
-    return db.get_topic_subgraph(topic_id)
-
-
-@app.post("/api/memory/edges")
-def api_memory_create_edge(req: MemEdgeCreate):
-    try:
-        eid = db.create_edge(
-            req.src_id, req.dst_id, req.type,
-            basis=req.basis, confidence=req.confidence, origin="manual",
-        )
-    except ValueError as e:
-        # Невалидная пара/тип или несуществующий узел — предохранитель сработал.
-        return JSONResponse(status_code=400, content={"error": str(e)})
-    return {"id": eid}
-
-
-@app.delete("/api/memory/edges/{edge_id}")
-def api_memory_delete_edge(edge_id: int):
-    db.soft_delete_edge(edge_id)
-    return {"ok": True}
-
-
 @app.post("/api/migrate")
 def api_migrate(req: MigrateRequest):
     for c in req.chats:
@@ -671,13 +539,6 @@ def _stream_chat_response(chat_id: str, model: str,
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-def _last_assistant_text(msgs: list[dict]) -> str | None:
-    for m in reversed(msgs):
-        if m["role"] == "assistant":
-            return m["content"]
-    return None
-
-
 @app.post("/chat/stream")
 async def chat_stream(req: StreamRequest):
     chat = db.get_chat(req.chat_id)
@@ -689,21 +550,7 @@ async def chat_stream(req: StreamRequest):
     leaf = chat.get("current_leaf_message_id")
     user_message = msgs[-1]["content"] if msgs and msgs[-1]["role"] == "user" else None
 
-    resp = _stream_chat_response(req.chat_id, model, leaf, user_message)
-
-    # Ручная запись в память: «запомни …». Агент отвечает как обычно, а разбор
-    # уходит в фон ПОСЛЕ стрима (resp.background), диалог не блокируется.
-    if user_message and db.get_setting("memory_write_enabled", "true") != "false":
-        is_cmd, content = memory_write.parse_remember_command(user_message)
-        if is_cmd:
-            if not content:  # «запомни это» → помним предыдущий ответ ассистента
-                content = _last_assistant_text(msgs)
-            if content:
-                resp.background = BackgroundTask(
-                    memory_write.remember, client, content,
-                    chat_id=req.chat_id, message_id=leaf, mode="on_request",
-                )
-    return resp
+    return _stream_chat_response(req.chat_id, model, leaf, user_message)
 
 
 @app.post("/api/chats/{chat_id}/branch")
@@ -780,11 +627,6 @@ def voice_page():
 @app.get("/settings")
 def settings_page():
     return FileResponse(BASE_DIR / "settings.html")
-
-
-@app.get("/memory")
-def memory_page():
-    return FileResponse(BASE_DIR / "memory.html")
 
 
 @app.post("/voice/chat/stream")

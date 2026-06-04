@@ -13,7 +13,6 @@ import re
 import anthropic
 
 import db
-import memory
 from agent import MODEL_CONTEXT_WINDOWS
 from prompts.summarizer import SUMMARIZER_SYSTEM_PROMPT
 from prompts.facts_extractor import FACTS_EXTRACTOR_SYSTEM_PROMPT
@@ -52,21 +51,13 @@ def build_system_prompt(
     base_prompt: str,
     summary_text: str | None,
     facts: list[dict] | None = None,
-    memory_text: str | None = None,
 ) -> str:
-    """base_prompt + summary + блок фактов + срез долговременной памяти (всё опционально)."""
+    """base_prompt + summary (если есть) + блок фактов (если есть)."""
     parts = [base_prompt]
 
     if summary_text:
         parts.append(
             "\n\n# Текущее краткое содержание разговора\n\n" + summary_text
-        )
-
-    if memory_text:
-        # Как обращаться с этим блоком — описано в базовом системпромпте
-        # (раздел «Долговременная память»), здесь только заголовок + данные.
-        parts.append(
-            "\n\n# Долговременная память (срез под запрос)\n\n" + memory_text
         )
 
     if facts:
@@ -362,23 +353,6 @@ def prepare_context(
         if facts_rows:
             facts = facts_rows
 
-    # F: Долговременная память (граф) — срез ищет КОД по тексту запроса.
-    # Глобальная, не зависит от chat_id/ветки. Подкладывается только если непуста,
-    # поэтому на пустом графе поведение чатов не меняется. Размер среза ограничен
-    # бюджетом в токенах (настройка memory_token_budget), фактический размер
-    # инъекции логируется в memory.retrieve_block.
-    memory_text = None
-    if user_message and db.get_setting("memory_read_enabled", "true") != "false":
-        try:
-            budget = int(db.get_setting("memory_token_budget", "600"))
-        except (TypeError, ValueError):
-            budget = memory.DEFAULT_TOKEN_BUDGET
-        memory_text = memory.retrieve_block(
-            client, model, user_message, budget
-        ) or None
-
-    system_prompt = build_system_prompt(
-        base_system_prompt, summary_text, facts, memory_text
-    )
+    system_prompt = build_system_prompt(base_system_prompt, summary_text, facts)
 
     return system_prompt, messages
