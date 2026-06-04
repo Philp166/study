@@ -9,11 +9,14 @@ DATABASE_URL задана → PostgreSQL (Render, прод).
 Линейный чат — вырожденное дерево, где у каждого сообщения один ребёнок.
 """
 
+import json
 import os
 import time
 import uuid
 from pathlib import Path
 from contextlib import contextmanager
+
+import memory_schema
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -162,6 +165,42 @@ CREATE TABLE IF NOT EXISTS chat_facts (
     updated_at DOUBLE PRECISION NOT NULL,
     UNIQUE(chat_id, key)
 );
+
+-- ── Долговременная память (граф): глобальная, без chat_id как ключа изоляции.
+--    source_* — только провенанс (из какого чата/сообщения пришёл узел/ребро). ──
+CREATE TABLE IF NOT EXISTS mem_nodes (
+    id                SERIAL PRIMARY KEY,
+    type              TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    attributes        TEXT NOT NULL DEFAULT '{}',
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    basis             TEXT NOT NULL DEFAULT '',
+    confidence        DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    status            TEXT NOT NULL DEFAULT 'active',
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        DOUBLE PRECISION NOT NULL,
+    updated_at        DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_nodes_type ON mem_nodes(type, status);
+CREATE INDEX IF NOT EXISTS idx_mem_nodes_name ON mem_nodes(name);
+
+CREATE TABLE IF NOT EXISTS mem_edges (
+    id                SERIAL PRIMARY KEY,
+    src_id            INTEGER NOT NULL REFERENCES mem_nodes(id) ON DELETE CASCADE,
+    dst_id            INTEGER NOT NULL REFERENCES mem_nodes(id) ON DELETE CASCADE,
+    type              TEXT NOT NULL,
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    basis             TEXT NOT NULL DEFAULT '',
+    confidence        DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    status            TEXT NOT NULL DEFAULT 'active',
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        DOUBLE PRECISION NOT NULL,
+    updated_at        DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_edges_src ON mem_edges(src_id, status);
+CREATE INDEX IF NOT EXISTS idx_mem_edges_dst ON mem_edges(dst_id, status);
 """
 
 _SCHEMA_SQLITE = """
@@ -234,6 +273,42 @@ CREATE TABLE IF NOT EXISTS chat_facts (
     updated_at REAL NOT NULL,
     UNIQUE(chat_id, key)
 );
+
+-- ── Долговременная память (граф): глобальная, без chat_id как ключа изоляции.
+--    source_* — только провенанс (из какого чата/сообщения пришёл узел/ребро). ──
+CREATE TABLE IF NOT EXISTS mem_nodes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    type              TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    attributes        TEXT NOT NULL DEFAULT '{}',
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    basis             TEXT NOT NULL DEFAULT '',
+    confidence        REAL NOT NULL DEFAULT 1.0,
+    status            TEXT NOT NULL DEFAULT 'active',
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_nodes_type ON mem_nodes(type, status);
+CREATE INDEX IF NOT EXISTS idx_mem_nodes_name ON mem_nodes(name);
+
+CREATE TABLE IF NOT EXISTS mem_edges (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_id            INTEGER NOT NULL REFERENCES mem_nodes(id) ON DELETE CASCADE,
+    dst_id            INTEGER NOT NULL REFERENCES mem_nodes(id) ON DELETE CASCADE,
+    type              TEXT NOT NULL,
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    basis             TEXT NOT NULL DEFAULT '',
+    confidence        REAL NOT NULL DEFAULT 1.0,
+    status            TEXT NOT NULL DEFAULT 'active',
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_edges_src ON mem_edges(src_id, status);
+CREATE INDEX IF NOT EXISTS idx_mem_edges_dst ON mem_edges(dst_id, status);
 """
 
 
@@ -920,6 +995,8 @@ def import_chat(chat_id: str, title: str, pinned: bool, model: str,
 _SETTING_DEFAULTS = {
     "tts_voice": "ru-RU-SvetlanaNeural",
     "voice_enabled": "true",
+    "memory_read_enabled": "true",
+    "memory_token_budget": "600",
 }
 
 
@@ -1107,3 +1184,311 @@ def delete_chat_fact_by_id(fact_id: int):
     with _connect() as conn:
         _execute(conn, f"DELETE FROM chat_facts WHERE id={_P}", (fact_id,))
         conn.commit()
+
+
+# ── Долговременная память: граф (mem_nodes / mem_edges) ──
+#
+# Глобальная (на пользователя), вне окна контекста. Запись — только через эти
+# функции; create_edge ОБЯЗАТЕЛЬНО прогоняет пару через memory_schema.validate_edge,
+# поэтому невалидное ребро физически нельзя создать ни ручным API, ни экстрактором.
+# Удаление — мягкое (status='active' → 'inactive'), узлы/рёбра физически не стираем.
+
+def _node_from_row(row: dict | None) -> dict | None:
+    """Парсит attributes из JSON-строки в dict (кросс-СУБД)."""
+    if not row:
+        return None
+    raw = row.get("attributes")
+    if isinstance(raw, str):
+        try:
+            row["attributes"] = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            row["attributes"] = {}
+    return row
+
+
+def _insert_returning_id(conn, sql: str, params) -> int:
+    """INSERT с возвратом id (кросс-СУБД), как _insert_message, но для любой таблицы."""
+    if _PG:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql + " RETURNING id", params)
+        return cur.fetchone()["id"]
+    cur = conn.execute(sql, params)
+    return cur.lastrowid
+
+
+def _get_node_row(conn, node_id: int) -> dict | None:
+    cur = _execute(conn, f"SELECT * FROM mem_nodes WHERE id={_P}", (node_id,))
+    return _fetchone(cur)
+
+
+# ── Nodes ──
+
+def create_node(node_type: str, name: str, *, attributes: dict | None = None,
+                origin: str = "manual", basis: str = "", confidence: float = 1.0,
+                status: str = "active", source_chat_id: str | None = None,
+                source_message_id: int | None = None) -> int:
+    ok, reason = memory_schema.validate_node_type(node_type)
+    if not ok:
+        raise ValueError(reason)
+    now = time.time()
+    attrs = json.dumps(attributes or {}, ensure_ascii=False)
+    sql = (
+        f"INSERT INTO mem_nodes (type, name, attributes, origin, basis, confidence, "
+        f"status, source_chat_id, source_message_id, created_at, updated_at) "
+        f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P})"
+    )
+    params = (node_type, name, attrs, origin, basis, confidence, status,
+              source_chat_id, source_message_id, now, now)
+    with _connect() as conn:
+        nid = _insert_returning_id(conn, sql, params)
+        conn.commit()
+        return nid
+
+
+def get_node(node_id: int) -> dict | None:
+    with _connect() as conn:
+        return _node_from_row(_get_node_row(conn, node_id))
+
+
+def get_active_nodes() -> list[dict]:
+    with _connect() as conn:
+        cur = _execute(conn, "SELECT * FROM mem_nodes WHERE status='active' ORDER BY id")
+        return [_node_from_row(r) for r in _fetchall(cur)]
+
+
+def get_nodes_by_type(node_type: str, *, active_only: bool = True) -> list[dict]:
+    clauses = [f"type={_P}"]
+    params: list = [node_type]
+    if active_only:
+        clauses.append("status='active'")
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT * FROM mem_nodes WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
+        return [_node_from_row(r) for r in _fetchall(cur)]
+
+
+def find_nodes_by_name(query: str, *, node_type: str | None = None,
+                       limit: int = 20, active_only: bool = True) -> list[dict]:
+    """Поиск по подстроке имени (именной индекс для дедупа/ручного поиска).
+
+    SQLite LIKE регистронезависим только для ASCII; для кириллицы подъём узлов
+    в пути чтения делает memory._find_seeds через Python .lower(). Здесь — для
+    ручного API/поиска, этого достаточно.
+    """
+    op = "ILIKE" if _PG else "LIKE"
+    clauses = [f"name {op} {_P}"]
+    params: list = [f"%{query}%"]
+    if active_only:
+        clauses.append("status='active'")
+    if node_type:
+        clauses.append(f"type={_P}")
+        params.append(node_type)
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT * FROM mem_nodes WHERE {' AND '.join(clauses)} "
+            f"ORDER BY id LIMIT {int(limit)}",
+            params,
+        )
+        return [_node_from_row(r) for r in _fetchall(cur)]
+
+
+def update_node(node_id: int, **fields) -> None:
+    allowed = {"name", "attributes", "basis", "confidence", "status"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k == "attributes":
+            v = json.dumps(v or {}, ensure_ascii=False)
+        sets.append(f"{k}={_P}")
+        vals.append(v)
+    if not sets:
+        return
+    sets.append(f"updated_at={_P}")
+    vals.append(time.time())
+    vals.append(node_id)
+    with _connect() as conn:
+        _execute(conn, f"UPDATE mem_nodes SET {', '.join(sets)} WHERE id={_P}", vals)
+        conn.commit()
+
+
+def soft_delete_node(node_id: int) -> None:
+    """Мягкое удаление: status='inactive'. Узел физически остаётся."""
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE mem_nodes SET status='inactive', updated_at={_P} WHERE id={_P}",
+            (time.time(), node_id),
+        )
+        conn.commit()
+
+
+# ── Edges ──
+
+def create_edge(src_id: int, dst_id: int, edge_type: str, *, origin: str = "manual",
+                basis: str = "", confidence: float = 1.0, status: str = "active",
+                source_chat_id: str | None = None,
+                source_message_id: int | None = None) -> int:
+    """Создаёт ребро ТОЛЬКО после проверки пары (src_type, dst_type) валидатором.
+
+    Бросает ValueError, если узлов нет или пара недопустима. Это и есть
+    «предохранитель» — единая точка, через которую проходит любая запись ребра.
+    """
+    now = time.time()
+    with _connect() as conn:
+        src = _get_node_row(conn, src_id)
+        dst = _get_node_row(conn, dst_id)
+        if not src:
+            raise ValueError(f"Узел-источник #{src_id} не найден")
+        if not dst:
+            raise ValueError(f"Узел-цель #{dst_id} не найден")
+        ok, reason = memory_schema.validate_edge(edge_type, src["type"], dst["type"])
+        if not ok:
+            raise ValueError(reason)
+        sql = (
+            f"INSERT INTO mem_edges (src_id, dst_id, type, origin, basis, confidence, "
+            f"status, source_chat_id, source_message_id, created_at, updated_at) "
+            f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P})"
+        )
+        params = (src_id, dst_id, edge_type, origin, basis, confidence, status,
+                  source_chat_id, source_message_id, now, now)
+        eid = _insert_returning_id(conn, sql, params)
+        conn.commit()
+        return eid
+
+
+def soft_delete_edge(edge_id: int) -> None:
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE mem_edges SET status='inactive', updated_at={_P} WHERE id={_P}",
+            (time.time(), edge_id),
+        )
+        conn.commit()
+
+
+# ── Конфликт версий: supersedes ──
+
+def supersede_node(old_id: int, *, name: str | None = None,
+                   attributes: dict | None = None, basis: str = "",
+                   confidence: float = 1.0, origin: str = "manual",
+                   source_chat_id: str | None = None,
+                   source_message_id: int | None = None) -> int:
+    """Конфликт факта: новое значение НЕ затирает старое.
+
+    Создаём новый узел того же типа → ребро supersedes (new → old) → старый
+    помечаем inactive. Источник правды = активная (новая) версия.
+    """
+    old = get_node(old_id)
+    if not old:
+        raise ValueError(f"Узел #{old_id} не найден")
+    ntype = old["type"]
+    if ntype not in memory_schema.SUPERSEDABLE_TYPES:
+        raise ValueError(
+            f"supersedes разрешён только для {', '.join(sorted(memory_schema.SUPERSEDABLE_TYPES))}, "
+            f"а узел #{old_id} имеет тип '{ntype}'."
+        )
+    new_id = create_node(
+        ntype,
+        name if name is not None else old["name"],
+        attributes=attributes if attributes is not None else old.get("attributes"),
+        origin=origin, basis=basis, confidence=confidence,
+        source_chat_id=source_chat_id, source_message_id=source_message_id,
+    )
+    create_edge(new_id, old_id, "supersedes", origin=origin, basis=basis,
+                confidence=confidence, source_chat_id=source_chat_id,
+                source_message_id=source_message_id)
+    soft_delete_node(old_id)
+    return new_id
+
+
+# ── Запросы подграфов (путь чтения и фронт) ──
+
+def get_subgraph(node_id: int, hops: int = 1, *, active_only: bool = True) -> dict:
+    """BFS от узла на `hops` шагов по рёбрам. Возвращает {nodes, edges}.
+
+    Рёбра — только те, у которых ОБА конца попали в выборку узлов (без висячих).
+    """
+    status_clause = " AND status='active'" if active_only else ""
+    with _connect() as conn:
+        visited: set[int] = set()
+        frontier: set[int] = {node_id}
+        edges: dict[int, dict] = {}
+        for _ in range(max(0, hops)):
+            if not frontier:
+                break
+            nxt: set[int] = set()
+            for nid in frontier:
+                if nid in visited:
+                    continue
+                visited.add(nid)
+                cur = _execute(
+                    conn,
+                    f"SELECT * FROM mem_edges WHERE (src_id={_P} OR dst_id={_P}){status_clause}",
+                    (nid, nid),
+                )
+                for e in _fetchall(cur):
+                    edges[e["id"]] = e
+                    other = e["dst_id"] if e["src_id"] == nid else e["src_id"]
+                    if other not in visited:
+                        nxt.add(other)
+            frontier = nxt
+        visited |= frontier
+
+        nodes = []
+        for nid in visited:
+            r = _get_node_row(conn, nid)
+            if r and (not active_only or r["status"] == "active"):
+                nodes.append(_node_from_row(r))
+        keep = {n["id"] for n in nodes}
+        clean_edges = [e for e in edges.values()
+                       if e["src_id"] in keep and e["dst_id"] in keep]
+        return {"nodes": nodes, "edges": clean_edges}
+
+
+def get_topic_subgraph(topic_id: int, *, active_only: bool = True) -> dict:
+    """Подграф темы: узлы, связанные ребром `about` с этой темой, + сама тема,
+    + активные рёбра между ними. Для экрана памяти (фокус по папке-теме)."""
+    status_clause = " AND status='active'" if active_only else ""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT * FROM mem_edges WHERE type='about' AND dst_id={_P}{status_clause}",
+            (topic_id,),
+        )
+        about_edges = _fetchall(cur)
+        ids = {topic_id} | {e["src_id"] for e in about_edges}
+
+        nodes = []
+        for nid in ids:
+            r = _get_node_row(conn, nid)
+            if r and (not active_only or r["status"] == "active"):
+                nodes.append(_node_from_row(r))
+        keep = {n["id"] for n in nodes}
+
+        edges: dict[int, dict] = {}
+        for nid in keep:
+            cur = _execute(
+                conn,
+                f"SELECT * FROM mem_edges WHERE (src_id={_P} OR dst_id={_P}){status_clause}",
+                (nid, nid),
+            )
+            for e in _fetchall(cur):
+                if e["src_id"] in keep and e["dst_id"] in keep:
+                    edges[e["id"]] = e
+        return {"nodes": nodes, "edges": list(edges.values())}
+
+
+def get_full_graph(*, active_only: bool = True) -> dict:
+    """Весь граф (для визуализации на экране памяти)."""
+    nfilter = " WHERE status='active'" if active_only else ""
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT * FROM mem_nodes{nfilter} ORDER BY id")
+        nodes = [_node_from_row(r) for r in _fetchall(cur)]
+        cur = _execute(conn, f"SELECT * FROM mem_edges{nfilter} ORDER BY id")
+        edges = _fetchall(cur)
+        return {"nodes": nodes, "edges": edges}

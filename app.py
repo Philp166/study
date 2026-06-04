@@ -34,6 +34,7 @@ import anthropic
 
 from agent import Agent
 import db
+import memory_schema
 import summarizer
 
 if not os.getenv("ANTHROPIC_API_KEY"):
@@ -269,6 +270,32 @@ class MigrateRequest(BaseModel):
     chats: list[MigrateChat]
 
 
+# ── Долговременная память (граф) ──
+
+class MemNodeCreate(BaseModel):
+    type: str
+    name: str
+    attributes: dict = {}
+    basis: str = ""
+    confidence: float = 1.0
+
+
+class MemNodeUpdate(BaseModel):
+    name: str | None = None
+    attributes: dict | None = None
+    basis: str | None = None
+    confidence: float | None = None
+    status: str | None = None
+
+
+class MemEdgeCreate(BaseModel):
+    src_id: int
+    dst_id: int
+    type: str
+    basis: str = ""
+    confidence: float = 1.0
+
+
 # ── Health-check (без пароля — пингует Render) ──
 
 @app.get("/healthz")
@@ -396,7 +423,7 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
-    allowed = {"tts_voice", "voice_enabled"}
+    allowed = {"tts_voice", "voice_enabled", "memory_read_enabled", "memory_token_budget"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -472,6 +499,90 @@ def api_get_facts(chat_id: str):
 @app.delete("/api/chats/{chat_id}/facts/{fact_id}")
 def api_delete_fact(chat_id: str, fact_id: int):
     db.delete_chat_fact_by_id(fact_id)
+    return {"ok": True}
+
+
+# ── Долговременная память: ручной граф (Фаза 1) ──
+
+@app.get("/api/memory/schema")
+def api_memory_schema():
+    """Закрытые списки типов узлов/рёбер с допустимыми парами — для фронта."""
+    return memory_schema.schema_summary()
+
+
+@app.get("/api/memory/graph")
+def api_memory_graph():
+    """Весь активный граф — для визуализации на экране памяти."""
+    return db.get_full_graph()
+
+
+@app.get("/api/memory/nodes")
+def api_memory_list_nodes(type: str | None = None, q: str | None = None):
+    if q:
+        return db.find_nodes_by_name(q, node_type=type)
+    if type:
+        return db.get_nodes_by_type(type)
+    return db.get_active_nodes()
+
+
+@app.post("/api/memory/nodes")
+def api_memory_create_node(req: MemNodeCreate):
+    ok, reason = memory_schema.validate_node_type(req.type)
+    if not ok:
+        return JSONResponse(status_code=400, content={"error": reason})
+    nid = db.create_node(
+        req.type, req.name, attributes=req.attributes,
+        basis=req.basis, confidence=req.confidence, origin="manual",
+    )
+    return {"id": nid, "node": db.get_node(nid)}
+
+
+@app.get("/api/memory/nodes/{node_id}")
+def api_memory_get_node(node_id: int):
+    node = db.get_node(node_id)
+    if not node:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    return {"node": node, "subgraph": db.get_subgraph(node_id, hops=1)}
+
+
+@app.patch("/api/memory/nodes/{node_id}")
+def api_memory_update_node(node_id: int, req: MemNodeUpdate):
+    if not db.get_node(node_id):
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    db.update_node(node_id, **fields)
+    return {"node": db.get_node(node_id)}
+
+
+@app.delete("/api/memory/nodes/{node_id}")
+def api_memory_delete_node(node_id: int):
+    """Мягкое удаление (status=inactive)."""
+    db.soft_delete_node(node_id)
+    return {"ok": True}
+
+
+@app.get("/api/memory/topics/{topic_id}/subgraph")
+def api_memory_topic_subgraph(topic_id: int):
+    """Подграф темы (фокус по папке-направлению на экране памяти)."""
+    return db.get_topic_subgraph(topic_id)
+
+
+@app.post("/api/memory/edges")
+def api_memory_create_edge(req: MemEdgeCreate):
+    try:
+        eid = db.create_edge(
+            req.src_id, req.dst_id, req.type,
+            basis=req.basis, confidence=req.confidence, origin="manual",
+        )
+    except ValueError as e:
+        # Невалидная пара/тип или несуществующий узел — предохранитель сработал.
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"id": eid}
+
+
+@app.delete("/api/memory/edges/{edge_id}")
+def api_memory_delete_edge(edge_id: int):
+    db.soft_delete_edge(edge_id)
     return {"ok": True}
 
 
