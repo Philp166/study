@@ -1,8 +1,11 @@
 /* ════════════════════════════════════════════════════════════════════
    CoS // AUTH GATE
-   Пароль на весь сайт без cookie: токен живёт ТОЛЬКО в памяти вкладки и
-   шлётся в заголовке Authorization: Bearer. При обновлении страницы (F5)
-   память обнуляется → токена нет → оверлей снова просит пароль.
+   Пароль на весь сайт без cookie: токен шлётся в заголовке
+   Authorization: Bearer. Храним его в sessionStorage, поэтому вход —
+   РАЗОВЫЙ на сессию: токен переживает обновление страницы (F5) и переходы
+   между разделами в той же вкладке, но очищается при закрытии браузера.
+   Cookie не используем сознательно (токен виден только этому JS, не уходит
+   автоматически на сервер с каждым запросом).
 
    Перехватывает window.fetch ЛЕНИВО: заголовок добавляется только когда
    токен уже есть, а оверлей всплывает лишь при ответе 401. Поэтому если
@@ -12,8 +15,18 @@
 (function () {
   "use strict";
 
-  var token = null;       // подписанный токен (в памяти вкладки)
+  var TOKEN_KEY = "cos_auth_token";
   var pending = null;     // промис, пока ждём ввод пароля (дедуп параллельных 401)
+
+  // sessionStorage может бросать в приватном режиме — оборачиваем в try/catch.
+  function loadToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || null; } catch (_) { return null; }
+  }
+  function saveToken(t) {
+    try { if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
+  }
+
+  var token = loadToken();   // подписанный токен (sessionStorage + память вкладки)
 
   var origFetch = window.fetch.bind(window);
 
@@ -42,6 +55,7 @@
       // pending НЕ трогаем: им владеет ensureAuth/showGate (дедуп параллельных
       // 401, иначе два запроса показали бы два оверлёя).
       token = null;
+      saveToken(null);
       await ensureAuth();
       res = await origFetch(input, withAuth(init));
     }
@@ -141,6 +155,7 @@
             if (r.ok) {
               var data = await r.json();
               token = data.token;
+              saveToken(token);
               ov.remove();
               pending = null;
               resolve();
