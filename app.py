@@ -17,7 +17,7 @@ BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
 import edge_tts
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -26,6 +26,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 
 log = logging.getLogger("cos.branch")
@@ -35,6 +36,7 @@ import anthropic
 from agent import Agent
 import db
 import memory_schema
+import memory_write
 import summarizer
 
 if not os.getenv("ANTHROPIC_API_KEY"):
@@ -296,6 +298,12 @@ class MemEdgeCreate(BaseModel):
     confidence: float = 1.0
 
 
+class MemRememberRequest(BaseModel):
+    content: str
+    chat_id: str | None = None
+    message_id: int | None = None
+
+
 # ── Health-check (без пароля — пингует Render) ──
 
 @app.get("/healthz")
@@ -423,7 +431,8 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
-    allowed = {"tts_voice", "voice_enabled", "memory_read_enabled", "memory_token_budget"}
+    allowed = {"tts_voice", "voice_enabled", "memory_read_enabled",
+               "memory_token_budget", "memory_vector_enabled", "memory_write_enabled"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -526,7 +535,7 @@ def api_memory_list_nodes(type: str | None = None, q: str | None = None):
 
 
 @app.post("/api/memory/nodes")
-def api_memory_create_node(req: MemNodeCreate):
+def api_memory_create_node(req: MemNodeCreate, background_tasks: BackgroundTasks):
     ok, reason = memory_schema.validate_node_type(req.type)
     if not ok:
         return JSONResponse(status_code=400, content={"error": reason})
@@ -534,7 +543,21 @@ def api_memory_create_node(req: MemNodeCreate):
         req.type, req.name, attributes=req.attributes,
         basis=req.basis, confidence=req.confidence, origin="manual",
     )
+    # эмбеддинг считаем в фоне (загрузка модели не должна тормозить ответ)
+    background_tasks.add_task(memory_write.index_node, nid)
     return {"id": nid, "node": db.get_node(nid)}
+
+
+@app.post("/api/memory/remember")
+def api_memory_remember(req: MemRememberRequest, background_tasks: BackgroundTasks):
+    """Ручная запись в память: разбор content экстрактором в фоне (on_request)."""
+    if not req.content.strip():
+        return JSONResponse(status_code=400, content={"error": "empty_content"})
+    background_tasks.add_task(
+        memory_write.remember, client, req.content,
+        chat_id=req.chat_id, message_id=req.message_id, mode="on_request",
+    )
+    return {"ok": True, "scheduled": True}
 
 
 @app.get("/api/memory/nodes/{node_id}")
@@ -546,11 +569,14 @@ def api_memory_get_node(node_id: int):
 
 
 @app.patch("/api/memory/nodes/{node_id}")
-def api_memory_update_node(node_id: int, req: MemNodeUpdate):
+def api_memory_update_node(node_id: int, req: MemNodeUpdate,
+                           background_tasks: BackgroundTasks):
     if not db.get_node(node_id):
         return JSONResponse(status_code=404, content={"error": "not_found"})
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     db.update_node(node_id, **fields)
+    # имя/основание могли поменяться — пересчитаем эмбеддинг в фоне
+    background_tasks.add_task(memory_write.index_node, node_id)
     return {"node": db.get_node(node_id)}
 
 
@@ -650,6 +676,13 @@ def _stream_chat_response(chat_id: str, model: str,
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+def _last_assistant_text(msgs: list[dict]) -> str | None:
+    for m in reversed(msgs):
+        if m["role"] == "assistant":
+            return m["content"]
+    return None
+
+
 @app.post("/chat/stream")
 async def chat_stream(req: StreamRequest):
     chat = db.get_chat(req.chat_id)
@@ -661,7 +694,21 @@ async def chat_stream(req: StreamRequest):
     leaf = chat.get("current_leaf_message_id")
     user_message = msgs[-1]["content"] if msgs and msgs[-1]["role"] == "user" else None
 
-    return _stream_chat_response(req.chat_id, model, leaf, user_message)
+    resp = _stream_chat_response(req.chat_id, model, leaf, user_message)
+
+    # Ручная запись в память: «запомни …». Агент отвечает как обычно, а разбор
+    # уходит в фон ПОСЛЕ стрима (resp.background), диалог не блокируется.
+    if user_message and db.get_setting("memory_write_enabled", "true") != "false":
+        is_cmd, content = memory_write.parse_remember_command(user_message)
+        if is_cmd:
+            if not content:  # «запомни это» → помним предыдущий ответ ассистента
+                content = _last_assistant_text(msgs)
+            if content:
+                resp.background = BackgroundTask(
+                    memory_write.remember, client, content,
+                    chat_id=req.chat_id, message_id=leaf, mode="on_request",
+                )
+    return resp
 
 
 @app.post("/api/chats/{chat_id}/branch")

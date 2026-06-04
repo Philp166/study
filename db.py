@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS mem_nodes (
     status            TEXT NOT NULL DEFAULT 'active',
     source_chat_id    TEXT,
     source_message_id INTEGER,
+    embedding         BYTEA,
     created_at        DOUBLE PRECISION NOT NULL,
     updated_at        DOUBLE PRECISION NOT NULL
 );
@@ -201,6 +202,21 @@ CREATE TABLE IF NOT EXISTS mem_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_mem_edges_src ON mem_edges(src_id, status);
 CREATE INDEX IF NOT EXISTS idx_mem_edges_dst ON mem_edges(dst_id, status);
+
+-- ── Слой знания (RAG): свободный текст, не лёгший в граф. embedding — BYTEA float32. ──
+CREATE TABLE IF NOT EXISTS mem_chunks (
+    id                SERIAL PRIMARY KEY,
+    text              TEXT NOT NULL,
+    embedding         BYTEA,
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    status            TEXT NOT NULL DEFAULT 'active',
+    node_id           INTEGER REFERENCES mem_nodes(id) ON DELETE SET NULL,
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        DOUBLE PRECISION NOT NULL,
+    updated_at        DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_chunks_status ON mem_chunks(status);
 """
 
 _SCHEMA_SQLITE = """
@@ -287,6 +303,7 @@ CREATE TABLE IF NOT EXISTS mem_nodes (
     status            TEXT NOT NULL DEFAULT 'active',
     source_chat_id    TEXT,
     source_message_id INTEGER,
+    embedding         BLOB,
     created_at        REAL NOT NULL,
     updated_at        REAL NOT NULL
 );
@@ -309,10 +326,39 @@ CREATE TABLE IF NOT EXISTS mem_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_mem_edges_src ON mem_edges(src_id, status);
 CREATE INDEX IF NOT EXISTS idx_mem_edges_dst ON mem_edges(dst_id, status);
+
+-- ── Слой знания (RAG): свободный текст, не лёгший в граф. embedding — BLOB float32. ──
+CREATE TABLE IF NOT EXISTS mem_chunks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    text              TEXT NOT NULL,
+    embedding         BLOB,
+    origin            TEXT NOT NULL DEFAULT 'manual',
+    status            TEXT NOT NULL DEFAULT 'active',
+    node_id           INTEGER REFERENCES mem_nodes(id) ON DELETE SET NULL,
+    source_chat_id    TEXT,
+    source_message_id INTEGER,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_chunks_status ON mem_chunks(status);
 """
 
 
 # ── Migration helpers ──
+
+def _table_exists(conn, table: str) -> bool:
+    if _PG:
+        cur = _execute(
+            conn,
+            "SELECT 1 FROM information_schema.tables WHERE table_name=" + _P,
+            (table,),
+        )
+        return _fetchone(cur) is not None
+    cur = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=" + _P, (table,)
+    )
+    return cur.fetchone() is not None
+
 
 def _column_exists(conn, table: str, col: str) -> bool:
     if _PG:
@@ -408,6 +454,12 @@ def _migrate(conn):
     # 7. chat_facts rebuild → +branch_anchor_message_id, UNIQUE(chat_id, anchor, key)
     if not _column_exists(conn, "chat_facts", "branch_anchor_message_id"):
         _rebuild_chat_facts(conn)
+        conn.commit()
+
+    # 8. memory: колонка embedding на mem_nodes (если таблица создана до фазы 2)
+    blob_type = "BYTEA" if _PG else "BLOB"
+    if _table_exists(conn, "mem_nodes") and not _column_exists(conn, "mem_nodes", "embedding"):
+        _execute(conn, f"ALTER TABLE mem_nodes ADD COLUMN embedding {blob_type}")
         conn.commit()
 
 
@@ -997,6 +1049,8 @@ _SETTING_DEFAULTS = {
     "voice_enabled": "true",
     "memory_read_enabled": "true",
     "memory_token_budget": "600",
+    "memory_vector_enabled": "true",
+    "memory_write_enabled": "true",
 }
 
 
@@ -1193,10 +1247,19 @@ def delete_chat_fact_by_id(fact_id: int):
 # поэтому невалидное ребро физически нельзя создать ни ручным API, ни экстрактором.
 # Удаление — мягкое (status='active' → 'inactive'), узлы/рёбра физически не стираем.
 
+def _bin(blob):
+    """Оборачивает bytes для bytea в PostgreSQL; для SQLite возвращает как есть."""
+    if blob is None:
+        return None
+    return psycopg2.Binary(blob) if _PG else blob
+
+
 def _node_from_row(row: dict | None) -> dict | None:
-    """Парсит attributes из JSON-строки в dict (кросс-СУБД)."""
+    """Парсит attributes из JSON-строки в dict; убирает сырой embedding-BLOB,
+    чтобы он не попал в JSON-ответы API (не сериализуется и не нужен клиенту)."""
     if not row:
         return None
+    row.pop("embedding", None)
     raw = row.get("attributes")
     if isinstance(raw, str):
         try:
@@ -1226,7 +1289,8 @@ def _get_node_row(conn, node_id: int) -> dict | None:
 def create_node(node_type: str, name: str, *, attributes: dict | None = None,
                 origin: str = "manual", basis: str = "", confidence: float = 1.0,
                 status: str = "active", source_chat_id: str | None = None,
-                source_message_id: int | None = None) -> int:
+                source_message_id: int | None = None,
+                embedding: bytes | None = None) -> int:
     ok, reason = memory_schema.validate_node_type(node_type)
     if not ok:
         raise ValueError(reason)
@@ -1234,15 +1298,42 @@ def create_node(node_type: str, name: str, *, attributes: dict | None = None,
     attrs = json.dumps(attributes or {}, ensure_ascii=False)
     sql = (
         f"INSERT INTO mem_nodes (type, name, attributes, origin, basis, confidence, "
-        f"status, source_chat_id, source_message_id, created_at, updated_at) "
-        f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P})"
+        f"status, source_chat_id, source_message_id, embedding, created_at, updated_at) "
+        f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P},{_P})"
     )
     params = (node_type, name, attrs, origin, basis, confidence, status,
-              source_chat_id, source_message_id, now, now)
+              source_chat_id, source_message_id, _bin(embedding), now, now)
     with _connect() as conn:
         nid = _insert_returning_id(conn, sql, params)
         conn.commit()
         return nid
+
+
+def set_node_embedding(node_id: int, embedding: bytes | None) -> None:
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE mem_nodes SET embedding={_P}, updated_at={_P} WHERE id={_P}",
+            (_bin(embedding), time.time(), node_id),
+        )
+        conn.commit()
+
+
+def get_node_vectors(*, active_only: bool = True) -> list[tuple[int, bytes]]:
+    """[(node_id, embedding_blob)] для векторного поиска. Без узлов без вектора."""
+    where = " WHERE status='active'" if active_only else ""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id, embedding FROM mem_nodes{where}",
+        )
+        rows = _fetchall(cur)
+    out = []
+    for r in rows:
+        blob = r.get("embedding")
+        if blob is not None:
+            out.append((r["id"], bytes(blob)))
+    return out
 
 
 def get_node(node_id: int) -> dict | None:
@@ -1492,3 +1583,68 @@ def get_full_graph(*, active_only: bool = True) -> dict:
         cur = _execute(conn, f"SELECT * FROM mem_edges{nfilter} ORDER BY id")
         edges = _fetchall(cur)
         return {"nodes": nodes, "edges": edges}
+
+
+# ── Слой знания: чанки (mem_chunks) ──
+
+_CHUNK_COLS = ("id, text, origin, status, node_id, source_chat_id, "
+               "source_message_id, created_at, updated_at")
+
+
+def create_chunk(text: str, *, embedding: bytes | None = None, origin: str = "manual",
+                 node_id: int | None = None, source_chat_id: str | None = None,
+                 source_message_id: int | None = None) -> int:
+    now = time.time()
+    sql = (
+        f"INSERT INTO mem_chunks (text, embedding, origin, status, node_id, "
+        f"source_chat_id, source_message_id, created_at, updated_at) "
+        f"VALUES ({_P},{_P},{_P},'active',{_P},{_P},{_P},{_P},{_P})"
+    )
+    params = (text, _bin(embedding), origin, node_id,
+              source_chat_id, source_message_id, now, now)
+    with _connect() as conn:
+        cid = _insert_returning_id(conn, sql, params)
+        conn.commit()
+        return cid
+
+
+def get_chunk(chunk_id: int) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(
+            conn, f"SELECT {_CHUNK_COLS} FROM mem_chunks WHERE id={_P}", (chunk_id,)
+        )
+        return _fetchone(cur)
+
+
+def get_active_chunks() -> list[dict]:
+    """Чанки без embedding-BLOB — безопасно для JSON-ответов."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_CHUNK_COLS} FROM mem_chunks WHERE status='active' ORDER BY id",
+        )
+        return _fetchall(cur)
+
+
+def soft_delete_chunk(chunk_id: int) -> None:
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE mem_chunks SET status='inactive', updated_at={_P} WHERE id={_P}",
+            (time.time(), chunk_id),
+        )
+        conn.commit()
+
+
+def get_chunk_vectors(*, active_only: bool = True) -> list[tuple[int, bytes]]:
+    """[(chunk_id, embedding_blob)] для векторного поиска."""
+    where = " WHERE status='active'" if active_only else ""
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT id, embedding FROM mem_chunks{where}")
+        rows = _fetchall(cur)
+    out = []
+    for r in rows:
+        blob = r.get("embedding")
+        if blob is not None:
+            out.append((r["id"], bytes(blob)))
+    return out
