@@ -4,4 +4,3 @@ fastapi
 uvicorn[standard]
 edge-tts
 psycopg2-binary
-fastembed
