@@ -1,11 +1,14 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,10 +19,15 @@ load_dotenv(BASE_DIR / ".env", override=True)
 import edge_tts
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 
 log = logging.getLogger("cos.branch")
 
@@ -39,62 +47,80 @@ db.init_db()
 
 app = FastAPI()
 
-# ── HTTP Basic Auth на всё приложение ──
+# ── Пароль на весь сайт через форму входа (cookie-сессия) ──
 # Пароль берётся ТОЛЬКО из переменной окружения (никогда не из кода/БД/.env-в-репо).
-# Нет переменной → auth выключен (удобно для локальной разработки).
-# Есть → каждый запрос требует пароль, кроме health-check и служебных путей.
+# Нет переменной → вход выключен (удобно для локальной разработки).
+# Есть → все страницы и эндпоинты доступны только после ввода пароля на /login.
 SITE_PASSWORD = os.getenv("SITE_PASSWORD")
 
-# Пути, которые НИКОГДА не требуют пароль.
-# /healthz пингует Render — под паролем сервис считался бы упавшим.
-AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico"}
+AUTH_COOKIE = "cos_auth"
+AUTH_MAX_AGE = 60 * 60 * 24 * 30  # срок жизни сессии — 30 дней
+
+# Пути, доступные без входа: health-check (его пингует Render — под паролем
+# сервис считался бы упавшим), favicon и сама страница входа/выхода.
+AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico", "/login", "/logout"}
 
 if not SITE_PASSWORD:
     logging.warning(
-        "SITE_PASSWORD не задан — Basic Auth ОТКЛЮЧЁН, сайт открыт без пароля. "
+        "SITE_PASSWORD не задан — вход по паролю ОТКЛЮЧЁН, сайт открыт без пароля. "
         "Это нормально для локальной разработки. На проде задай SITE_PASSWORD "
         "в переменных окружения (например, в дашборде Render)."
     )
 
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
-    """Требует HTTP Basic Auth на всех роутах разом (страницы, API, статика, SSE).
+def _make_auth_token() -> str:
+    """Подписанный токен сессии вида `<expiry>.<hmac>`. Ключ подписи — сам пароль,
+    поэтому смена SITE_PASSWORD автоматически инвалидирует все старые сессии."""
+    expiry = str(int(time.time()) + AUTH_MAX_AGE)
+    sig = hmac.new(SITE_PASSWORD.encode(), expiry.encode(), hashlib.sha256).hexdigest()
+    return f"{expiry}.{sig}"
 
-    Username не проверяется (любой), сверяется только пароль — через
-    secrets.compare_digest (защита от timing-атак). Middleware НЕ читает и НЕ
-    буферизует тело ответа: при успехе просто возвращает результат call_next,
-    поэтому StreamingResponse / SSE проходит чанками без изменений.
+
+def _valid_auth_token(token: str) -> bool:
+    """Проверяет подпись и срок токена из cookie (timing-safe)."""
+    if not token or "." not in token:
+        return False
+    expiry, _, sig = token.partition(".")
+    expected = hmac.new(SITE_PASSWORD.encode(), expiry.encode(), hashlib.sha256).hexdigest()
+    if not secrets.compare_digest(sig, expected):
+        return False
+    try:
+        return int(expiry) > int(time.time())
+    except ValueError:
+        return False
+
+
+class SitePasswordMiddleware(BaseHTTPMiddleware):
+    """Закрывает все роуты (страницы, API, статика, SSE) до ввода пароля на /login.
+
+    Авторизация хранится в подписанной HttpOnly-cookie, которая браузер сам шлёт
+    с каждым запросом, включая fetch-стриминг (same-origin) — SSE не ломается.
+    Middleware НЕ читает и НЕ буферизует тело ответа, поэтому StreamingResponse
+    проходит чанками без изменений.
     """
 
     async def dispatch(self, request: Request, call_next):
-        # Auth выключен (нет пароля) — пропускаем всё.
+        # Вход выключен (нет пароля) — пропускаем всё.
         if not SITE_PASSWORD:
             return await call_next(request)
 
-        # CORS preflight (браузер шлёт его без credentials) и исключённые пути.
+        # CORS preflight и пути, не требующие входа.
         if request.method == "OPTIONS" or request.url.path in AUTH_EXEMPT_PATHS:
             return await call_next(request)
 
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:]).decode("utf-8")
-                _, _, password = decoded.partition(":")
-            except Exception:
-                password = ""
-            if secrets.compare_digest(password, SITE_PASSWORD):
-                return await call_next(request)
+        if _valid_auth_token(request.cookies.get(AUTH_COOKIE, "")):
+            return await call_next(request)
 
-        # Нет/неверный пароль — браузер покажет окно ввода логина/пароля.
-        return Response(
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="CoS"'},
-        )
+        # Не авторизован: навигацию по страницам уводим на форму входа,
+        # запросы fetch/API получают 401 (фронтенд сам решит, что показать).
+        accept = request.headers.get("accept", "")
+        if request.method == "GET" and "text/html" in accept:
+            return RedirectResponse("/login", status_code=302)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
-# Регистрируем ДО CORS, чтобы CORS остался внешним middleware:
-# тогда preflight и CORS-заголовки (в т.ч. на ответе 401) работают корректно.
-app.add_middleware(BasicAuthMiddleware)
+# Регистрируем ДО CORS, чтобы CORS остался внешним middleware.
+app.add_middleware(SitePasswordMiddleware)
 
 _origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 if _origins:
@@ -244,6 +270,118 @@ class MigrateRequest(BaseModel):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+# ── Вход по паролю (форма + cookie-сессия) ──
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex;
+      align-items: center; justify-content: center;
+      background: #0f1115; color: #e8e8ea;
+      font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    }
+    .card {
+      width: 100%; max-width: 360px; padding: 32px;
+      background: #1a1d24; border: 1px solid #2a2e38; border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0,0,0,.4);
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    p { margin: 0 0 20px; color: #9aa0ab; font-size: 14px; }
+    input {
+      width: 100%; padding: 12px 14px; font-size: 15px;
+      background: #0f1115; color: #e8e8ea;
+      border: 1px solid #2a2e38; border-radius: 9px; outline: none;
+    }
+    input:focus { border-color: #5b8cff; }
+    button {
+      width: 100%; margin-top: 12px; padding: 12px 14px; font-size: 15px;
+      font-weight: 600; color: #fff; cursor: pointer;
+      background: #5b8cff; border: none; border-radius: 9px;
+    }
+    button:hover { background: #4a7bf0; }
+    button:disabled { opacity: .6; cursor: default; }
+    .err { margin-top: 12px; color: #ff6b6b; font-size: 14px; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <form class="card" id="f">
+    <h1>Вход</h1>
+    <p>Введите пароль, чтобы продолжить.</p>
+    <input type="password" id="pwd" placeholder="Пароль" autofocus autocomplete="current-password">
+    <button type="submit" id="btn">Войти</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    const f = document.getElementById('f');
+    const pwd = document.getElementById('pwd');
+    const err = document.getElementById('err');
+    const btn = document.getElementById('btn');
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd.value }),
+        });
+        if (res.ok) {
+          window.location.replace('/');
+        } else {
+          err.textContent = 'Неверный пароль';
+          pwd.select();
+        }
+      } catch (_) {
+        err.textContent = 'Ошибка сети, попробуйте ещё раз';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>"""
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+@app.get("/login")
+def login_page(request: Request):
+    # Вход выключен или уже авторизован — нечего показывать, ведём на сайт.
+    if not SITE_PASSWORD or _valid_auth_token(request.cookies.get(AUTH_COOKIE, "")):
+        return RedirectResponse("/", status_code=302)
+    return HTMLResponse(LOGIN_HTML)
+
+
+@app.post("/login")
+def login_submit(req: LoginRequest):
+    if not SITE_PASSWORD:
+        return JSONResponse({"ok": True})
+    if secrets.compare_digest(req.password, SITE_PASSWORD):
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie(
+            AUTH_COOKIE, _make_auth_token(),
+            max_age=AUTH_MAX_AGE, httponly=True, samesite="lax",
+        )
+        return resp
+    return JSONResponse({"ok": False, "error": "wrong_password"}, status_code=401)
+
+
+@app.get("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(AUTH_COOKIE)
+    return resp
 
 
 # ── Pages ──
