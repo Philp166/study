@@ -21,7 +21,6 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
-    HTMLResponse,
     JSONResponse,
     RedirectResponse,
     StreamingResponse,
@@ -47,22 +46,26 @@ db.init_db()
 
 app = FastAPI()
 
-# ── Пароль на весь сайт через форму входа (cookie-сессия) ──
+# ── Пароль на весь сайт (Bearer-токен, спрашивается при каждом заходе) ──
 # Пароль берётся ТОЛЬКО из переменной окружения (никогда не из кода/БД/.env-в-репо).
 # Нет переменной → вход выключен (удобно для локальной разработки).
-# Есть → все страницы и эндпоинты доступны только после ввода пароля на /login.
+#
+# Модель: токен живёт ТОЛЬКО в памяти вкладки (JS-переменная в auth-gate.js) и
+# шлётся в заголовке `Authorization: Bearer <token>`. При обновлении страницы
+# (F5) память обнуляется → токена нет → оверлей снова просит пароль. Cookie не
+# используем сознательно: cookie пережила бы reload и пароль не спрашивался бы.
 SITE_PASSWORD = os.getenv("SITE_PASSWORD")
 
-AUTH_COOKIE = "cos_auth"
-# Cookie делаем СЕССИОННОЙ (без max_age) — браузер стирает её при закрытии,
-# поэтому при следующем заходе на сайт пароль спрашивается заново.
-# AUTH_TTL — срок жизни самого подписанного токена (страховка, даже если
-# браузер не закрывали): по истечении пароль попросят снова.
-AUTH_TTL = 60 * 60 * 6  # 6 часов
+AUTH_TTL = 60 * 60 * 6  # срок жизни токена — 6 часов (страховка от протухания)
 
-# Пути, доступные без входа: health-check (его пингует Render — под паролем
-# сервис считался бы упавшим), favicon и сама страница входа/выхода.
-AUTH_EXEMPT_PATHS = {"/healthz", "/favicon.ico", "/login", "/logout"}
+# Публичные пути: только «оболочка» сайта (она не содержит данных — данные грузятся
+# через /api после ввода пароля) + статика для отрисовки оверлёя входа + health-check.
+# Всё остальное (/api/*, стримы) требует валидный Bearer-токен.
+PUBLIC_PATHS = {
+    "/", "/voice", "/settings",
+    "/login", "/healthz", "/favicon.ico",
+    "/styles.css", "/agent.js", "/auth-gate.js",
+}
 
 if not SITE_PASSWORD:
     logging.warning(
@@ -73,15 +76,15 @@ if not SITE_PASSWORD:
 
 
 def _make_auth_token() -> str:
-    """Подписанный токен сессии вида `<expiry>.<hmac>`. Ключ подписи — сам пароль,
-    поэтому смена SITE_PASSWORD автоматически инвалидирует все старые сессии."""
+    """Подписанный токен вида `<expiry>.<hmac>`. Ключ подписи — сам пароль,
+    поэтому смена SITE_PASSWORD автоматически инвалидирует все старые токены."""
     expiry = str(int(time.time()) + AUTH_TTL)
     sig = hmac.new(SITE_PASSWORD.encode(), expiry.encode(), hashlib.sha256).hexdigest()
     return f"{expiry}.{sig}"
 
 
 def _valid_auth_token(token: str) -> bool:
-    """Проверяет подпись и срок токена из cookie (timing-safe)."""
+    """Проверяет подпись и срок токена (timing-safe)."""
     if not token or "." not in token:
         return False
     expiry, _, sig = token.partition(".")
@@ -95,12 +98,12 @@ def _valid_auth_token(token: str) -> bool:
 
 
 class SitePasswordMiddleware(BaseHTTPMiddleware):
-    """Закрывает все роуты (страницы, API, статика, SSE) до ввода пароля на /login.
+    """Требует Bearer-токен на всех данных/эндпоинтах (кроме PUBLIC_PATHS).
 
-    Авторизация хранится в подписанной HttpOnly-cookie, которая браузер сам шлёт
-    с каждым запросом, включая fetch-стриминг (same-origin) — SSE не ломается.
-    Middleware НЕ читает и НЕ буферизует тело ответа, поэтому StreamingResponse
-    проходит чанками без изменений.
+    Оболочка страниц отдаётся свободно, чтобы клиентский auth-gate.js успел
+    показать оверлей входа; секретные данные (/api/*, стримы) — только с токеном.
+    Middleware НЕ читает и НЕ буферизует тело ответа, поэтому StreamingResponse /
+    SSE проходит чанками без изменений.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -108,18 +111,14 @@ class SitePasswordMiddleware(BaseHTTPMiddleware):
         if not SITE_PASSWORD:
             return await call_next(request)
 
-        # CORS preflight и пути, не требующие входа.
-        if request.method == "OPTIONS" or request.url.path in AUTH_EXEMPT_PATHS:
+        # CORS preflight и публичная оболочка/статика.
+        if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
             return await call_next(request)
 
-        if _valid_auth_token(request.cookies.get(AUTH_COOKIE, "")):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and _valid_auth_token(auth[7:]):
             return await call_next(request)
 
-        # Не авторизован: навигацию по страницам уводим на форму входа,
-        # запросы fetch/API получают 401 (фронтенд сам решит, что показать).
-        accept = request.headers.get("accept", "")
-        if request.method == "GET" and "text/html" in accept:
-            return RedirectResponse("/login", status_code=302)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
@@ -278,205 +277,32 @@ def healthz():
 
 # ── Вход по паролю (форма + cookie-сессия) ──
 
-LOGIN_HTML = """<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CoS // ДОСТУП</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg-0:#050614; --bg-1:#0a0a1f; --bg-2:#0f1030; --line:#1f2160; --line-2:#2a2d7a;
-      --cyan:#00f0ff; --cyan-dim:#0090a0; --magenta:#ff2e63; --violet:#6b5cff;
-      --ink-0:#e8e9ff; --ink-1:#aab0e0; --ink-2:#6e74a8; --ink-3:#3e4380;
-      --f-display:"Space Grotesk","Inter",ui-sans-serif,sans-serif;
-      --f-mono:"JetBrains Mono",ui-monospace,monospace;
-      --scan-opacity:.18;
-    }
-    * { box-sizing:border-box; margin:0; padding:0; }
-    html, body { height:100%; }
-    body {
-      font-family:var(--f-display); color:var(--ink-0);
-      background:
-        radial-gradient(1200px 800px at 20% 10%, rgba(107,92,255,.10), transparent 60%),
-        radial-gradient(900px 700px at 90% 80%, rgba(0,240,255,.06), transparent 65%),
-        var(--bg-0);
-      display:flex; align-items:center; justify-content:center;
-      overflow:hidden; position:relative;
-    }
-    input { font:inherit; color:inherit; background:none; border:0; outline:0; }
-    button { font:inherit; color:inherit; background:none; border:0; cursor:pointer; }
-
-    /* CRT / vignette */
-    .crt-overlay { position:fixed; inset:0; pointer-events:none; z-index:9999; mix-blend-mode:overlay; }
-    .crt-overlay::before {
-      content:""; position:absolute; inset:0;
-      background:repeating-linear-gradient(to bottom,
-        transparent 0px, transparent 2px,
-        rgba(0,0,0,var(--scan-opacity)) 2px, rgba(0,0,0,var(--scan-opacity)) 3px);
-    }
-    .vignette {
-      position:fixed; inset:0; pointer-events:none; z-index:9998;
-      background:radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,.6) 100%);
-    }
-
-    /* Panel with angular cut */
-    .panel-cut {
-      --c:14px; position:relative; padding:1px; width:100%; max-width:380px;
-      background:linear-gradient(135deg, var(--line-2), var(--line) 40%, var(--line-2));
-      clip-path:polygon(var(--c) 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%, 0 var(--c));
-      z-index:1;
-    }
-    .panel-inner {
-      background:linear-gradient(180deg, rgba(15,16,48,.94), rgba(10,10,31,.94));
-      clip-path:polygon(var(--c) 0, 100% 0, 100% calc(100% - var(--c)), calc(100% - var(--c)) 100%, 0 100%, 0 var(--c));
-      padding:34px 30px 30px;
-    }
-
-    /* Runline */
-    @keyframes runline-x { 0% { transform:translateX(-100%) } 100% { transform:translateX(100%) } }
-    .runline { position:absolute; left:0; right:0; top:0; height:1px; overflow:hidden;
-      background:linear-gradient(90deg, transparent, var(--cyan), transparent); opacity:.6; }
-    .runline::after { content:""; position:absolute; inset:0;
-      background:linear-gradient(90deg, transparent 0%, var(--cyan) 50%, transparent 100%);
-      animation:runline-x 3.6s linear infinite; }
-
-    /* Brand + glitch */
-    .brand { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
-    @keyframes flicker-text { 0%,96%,100% { opacity:1 } 97% { opacity:.55 } 98% { opacity:1 } 99% { opacity:.7 } }
-    .title {
-      font-weight:700; font-size:26px; letter-spacing:.04em; position:relative;
-      display:inline-block; animation:flicker-text 5.4s infinite;
-    }
-    .title::before, .title::after {
-      content:attr(data-text); position:absolute; left:0; top:0; width:100%;
-      pointer-events:none; mix-blend-mode:screen;
-    }
-    .title::before { color:var(--magenta); transform:translate(1.2px,0); clip-path:inset(0 0 60% 0); opacity:.85; }
-    .title::after  { color:var(--cyan);    transform:translate(-1.2px,0); clip-path:inset(58% 0 0 0); opacity:.85; }
-    .sub { font-family:var(--f-mono); font-size:10px; color:var(--ink-2); letter-spacing:.06em; }
-
-    .hud { font-family:var(--f-mono); font-size:10px; color:var(--ink-2);
-      letter-spacing:.14em; text-transform:uppercase; margin:18px 0 8px; }
-
-    /* Input */
-    .field { position:relative; }
-    .field input {
-      width:100%; padding:12px 14px; font-family:var(--f-mono); font-size:13px;
-      letter-spacing:.04em; background:rgba(5,6,20,.8); color:var(--ink-0);
-      border:1px solid var(--line-2);
-      clip-path:polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
-      transition:border-color .15s, box-shadow .15s;
-    }
-    .field input::placeholder { color:var(--ink-3); }
-    .field input:focus { border-color:var(--cyan); box-shadow:0 0 20px rgba(0,240,255,.18); }
-
-    /* Button */
-    .btn-primary {
-      width:100%; margin-top:14px; padding:11px 16px;
-      font-family:var(--f-mono); font-size:11px; font-weight:600;
-      letter-spacing:.12em; text-transform:uppercase;
-      background:var(--cyan); color:#021016; border:1px solid var(--cyan);
-      clip-path:polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
-      box-shadow:0 0 18px rgba(0,240,255,.35);
-      transition:background .15s, box-shadow .15s;
-    }
-    .btn-primary:hover { background:#5cf8ff; box-shadow:0 0 30px rgba(0,240,255,.6); }
-    .btn-primary:disabled { opacity:.55; cursor:default; box-shadow:none; }
-
-    .err {
-      margin-top:12px; min-height:16px; font-family:var(--f-mono); font-size:11px;
-      letter-spacing:.04em; color:var(--magenta); text-shadow:0 0 8px rgba(255,46,99,.5);
-    }
-  </style>
-</head>
-<body>
-  <div class="crt-overlay"></div>
-  <div class="vignette"></div>
-
-  <form class="panel-cut" id="f">
-    <div class="panel-inner">
-      <div class="runline"></div>
-      <div class="brand">
-        <span class="title" data-text="ШТАБ">ШТАБ</span>
-        <span class="sub">// CHIEF.OF.STAFF</span>
-      </div>
-      <div class="hud">[ ДОСТУП ОГРАНИЧЕН // ENTER PASSCODE ]</div>
-      <div class="field">
-        <input type="password" id="pwd" placeholder="• • • • • • • •" autofocus autocomplete="current-password">
-      </div>
-      <button type="submit" class="btn-primary" id="btn">Войти →</button>
-      <div class="err" id="err"></div>
-    </div>
-  </form>
-
-  <script>
-    const f = document.getElementById('f');
-    const pwd = document.getElementById('pwd');
-    const err = document.getElementById('err');
-    const btn = document.getElementById('btn');
-    f.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      err.textContent = '';
-      btn.disabled = true;
-      try {
-        const res = await fetch('/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pwd.value }),
-        });
-        if (res.ok) {
-          window.location.replace('/');
-        } else {
-          err.textContent = '> ОТКАЗ: неверный пароль';
-          pwd.select();
-        }
-      } catch (_) {
-        err.textContent = '> ОШИБКА СЕТИ — повторите';
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  </script>
-</body>
-</html>"""
-
-
 class LoginRequest(BaseModel):
     password: str
 
 
 @app.get("/login")
-def login_page(request: Request):
-    # Вход выключен или уже авторизован — нечего показывать, ведём на сайт.
-    if not SITE_PASSWORD or _valid_auth_token(request.cookies.get(AUTH_COOKIE, "")):
-        return RedirectResponse("/", status_code=302)
-    return HTMLResponse(LOGIN_HTML)
+def login_page():
+    # Отдельной страницы входа нет — пароль спрашивает оверлей (auth-gate.js)
+    # прямо поверх приложения. Прямой заход на /login просто ведём на сайт.
+    return RedirectResponse("/", status_code=302)
 
 
 @app.post("/login")
 def login_submit(req: LoginRequest):
+    # Возвращаем токен в ТЕЛЕ ответа (не в cookie): фронтенд держит его в памяти
+    # вкладки и шлёт в заголовке Authorization. Reload памяти не переживает →
+    # пароль спрашивается заново.
     if not SITE_PASSWORD:
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "token": ""})
     if secrets.compare_digest(req.password, SITE_PASSWORD):
-        resp = JSONResponse({"ok": True})
-        # Без max_age/expires → сессионная cookie: исчезает при закрытии браузера.
-        resp.set_cookie(
-            AUTH_COOKIE, _make_auth_token(),
-            httponly=True, samesite="lax",
-        )
-        return resp
+        return JSONResponse({"ok": True, "token": _make_auth_token()})
     return JSONResponse({"ok": False, "error": "wrong_password"}, status_code=401)
 
 
-@app.get("/logout")
-def logout():
-    resp = RedirectResponse("/login", status_code=302)
-    resp.delete_cookie(AUTH_COOKIE)
-    return resp
+@app.get("/auth-gate.js")
+def serve_auth_gate_js():
+    return FileResponse(BASE_DIR / "auth-gate.js", media_type="application/javascript")
 
 
 # ── Pages ──
