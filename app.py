@@ -712,6 +712,7 @@ def _stream_chat_response(chat_id: str, model: str,
         cos_agent.system_prompt,
         user_message_id,
         user_message=user_message_text,
+        inject_memory=True,
     )
 
     def generate():

@@ -1372,7 +1372,7 @@ def relevant_memory(text: str, limit: int = 5) -> list[dict]:
                 params.extend([like, like])
             cur = _execute(
                 conn,
-                f"SELECT id, title, content FROM long_term_memory "
+                f"SELECT id, title, content, folder FROM long_term_memory "
                 f"WHERE status='active' AND ({' OR '.join(clauses)}) "
                 f"ORDER BY updated_at DESC LIMIT {lim}",
                 params,
@@ -1381,12 +1381,13 @@ def relevant_memory(text: str, limit: int = 5) -> list[dict]:
         if not rows:
             cur = _execute(
                 conn,
-                f"SELECT id, title, content FROM long_term_memory "
+                f"SELECT id, title, content, folder FROM long_term_memory "
                 f"WHERE status='active' ORDER BY updated_at DESC LIMIT {lim}",
             )
             rows = _fetchall(cur)
     return [
-        {"id": r["id"], "title": r["title"], "content_preview": (r["content"] or "")[:300]}
+        {"id": r["id"], "title": r["title"], "content_preview": (r["content"] or "")[:300],
+         "folder": r["folder"]}
         for r in rows
     ]
 

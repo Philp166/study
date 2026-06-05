@@ -51,9 +51,20 @@ def build_system_prompt(
     base_prompt: str,
     summary_text: str | None,
     facts: list[dict] | None = None,
+    memory_block: str | None = None,
+    tasks_block: str | None = None,
 ) -> str:
-    """base_prompt + summary (если есть) + блок фактов (если есть)."""
+    """base_prompt + долговременная память + задачи + summary + блок фактов.
+
+    Память и задачи идут ПЕРЕД summary/facts: они стабильнее (живут между чатами)
+    и менее «свежие», чем summary/facts текущего диалога.
+    """
     parts = [base_prompt]
+
+    if memory_block:
+        parts.append(memory_block)
+    if tasks_block:
+        parts.append(tasks_block)
 
     if summary_text:
         parts.append(
@@ -298,6 +309,75 @@ def extract_and_apply_facts(
         db.add_chat_fact(chat_id, item["key"], item["value"], leaf_message_id)
 
 
+# ── Долговременная память + активные задачи в системпромпт (Фаза 4) ──
+
+MEMORY_TOKEN_BUDGET = 1500   # суммарно на блок памяти + блок задач
+TASK_CONTEXT_CAP = 500       # защитный кап на context одной задачи (живой документ)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Консервативная верхняя оценка токенов (≈2 симв/токен для кириллицы).
+    Без сетевого вызова на горячем пути — блоки и так малы. Точный аналог —
+    client.beta.messages.count_tokens, но он добавил бы вызов на каждый запрос."""
+    return (len(text) + 1) // 2
+
+
+def _render_memory_block(notes: list[dict], content_cap: int | None = None) -> str:
+    lines = ["\n\n# Долговременная память\n"]
+    for n in notes:
+        folder = n.get("folder")
+        head = f"\n## {n['title']} ({folder})" if folder else f"\n## {n['title']}"
+        content = n.get("content_preview") or ""
+        if content_cap is not None:
+            content = content[:content_cap]
+        lines.append(head + ("\n" + content if content else ""))
+    return "".join(lines)
+
+
+def _render_tasks_block(tasks: list[dict]) -> str:
+    lines = ["\n\n# Активные задачи\n"]
+    for t in tasks:
+        ctx = (t.get("context") or "")[:TASK_CONTEXT_CAP]
+        lines.append(f"\n## {t['title']}" + ("\n" + ctx if ctx else ""))
+    return "".join(lines)
+
+
+def build_memory_blocks(
+    notes: list[dict], tasks: list[dict]
+) -> tuple[str | None, str | None]:
+    """Строит (memory_block, tasks_block) под токен-бюджет MEMORY_TOKEN_BUDGET.
+
+    Урезание при переполнении: (1) контент заметок → 100 симв; (2) выкидываем
+    заметки с конца (они отсортированы по релевантности/свежести). Задачи не
+    урезаем (но context каждой капится TASK_CONTEXT_CAP в рендере). Если обоих
+    нет — (None, None), пустые заголовки не добавляем."""
+    if not notes and not tasks:
+        return None, None
+
+    tasks_block = _render_tasks_block(tasks) if tasks else None
+    tasks_tokens = _estimate_tokens(tasks_block) if tasks_block else 0
+    if not notes:
+        return None, tasks_block
+
+    mem = _render_memory_block(notes)
+    if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+        return mem, tasks_block
+
+    mem = _render_memory_block(notes, content_cap=100)
+    if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+        return mem, tasks_block
+
+    kept = list(notes)
+    while kept:
+        kept.pop()
+        if not kept:
+            return None, tasks_block
+        mem = _render_memory_block(kept, content_cap=100)
+        if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+            return mem, tasks_block
+    return None, tasks_block
+
+
 # ── Orchestrator: собирает messages с учётом всех трёх стратегий ──
 
 def prepare_context(
@@ -307,8 +387,13 @@ def prepare_context(
     base_system_prompt: str,
     leaf_message_id: int | None,
     user_message: str | None = None,
+    inject_memory: bool = False,
 ) -> tuple[str, list[dict]]:
     """Возвращает (system_prompt, messages) для отправки в Claude.
+
+    inject_memory=True добавляет в системпромпт глобальные блоки долговременной
+    памяти (релевантные заметки) и активных задач — ПЕРЕД summary/facts. По
+    умолчанию False, чтобы голосовой путь (своя prepare_context) остался без них.
 
     Все три стратегии работают по истории АКТИВНОЙ ВЕТКИ — пути от
     leaf_message_id до корня (рекурсивный CTE в db.get_branch_history).
@@ -346,6 +431,15 @@ def prepare_context(
         window_size = settings.get("sliding_window_size", 20)
         messages = apply_sliding_window(messages, window_size)
 
+    # E0: Долговременная память + активные задачи (глобальные, между чатами).
+    # Только для текстового пути (inject_memory=True). Память НЕ влияет на порог
+    # суммаризации (maybe_summarize строит промпт без этих блоков).
+    memory_block = tasks_block = None
+    if inject_memory:
+        notes = db.relevant_memory(user_message or "", limit=5)
+        active_tasks = db.list_tasks(status="active")
+        memory_block, tasks_block = build_memory_blocks(notes, active_tasks)
+
     # E: Build system prompt with branch-active facts
     facts = None
     if settings.get("sticky_facts_enabled"):
@@ -353,6 +447,9 @@ def prepare_context(
         if facts_rows:
             facts = facts_rows
 
-    system_prompt = build_system_prompt(base_system_prompt, summary_text, facts)
+    system_prompt = build_system_prompt(
+        base_system_prompt, summary_text, facts,
+        memory_block=memory_block, tasks_block=tasks_block,
+    )
 
     return system_prompt, messages
