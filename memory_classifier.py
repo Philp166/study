@@ -1,10 +1,9 @@
-"""Субагент-классификатор памяти (Фаза 3).
+"""Воркер инструмента `remember` (главный агент → классификатор).
 
-После сообщения пользователя решает, есть ли что предложить к сохранению в
-долговременную память / буфер задач, и подтверждает ли пользователь словами
-ранее показанное предложение. Один синхронный вызов Haiku (temperature=0),
-fail-open: любая ошибка → ничего не предлагаем. Аналог extract_and_apply_facts
-в summarizer.py, но НЕ пишет в БД сам и НЕ трогает token_stats главного агента.
+Когда агент по явной просьбе пользователя вызывает `remember`, этот модуль
+превращает его текст (+ контекст разговора + существующую память + активные задачи)
+в структурированные операции над БД: заметка памяти и/или задача. Один синхронный
+вызов Haiku, fail-safe: нет конкретики → {"task": None, "memory": None}.
 """
 
 import json
@@ -15,33 +14,18 @@ from prompts.memory_classifier import MEMORY_CLASSIFIER_SYSTEM_PROMPT
 
 log = logging.getLogger("cos.memory")
 
-CLASSIFIER_MODEL = "claude-haiku-4-5"
+COMPOSER_MODEL = "claude-haiku-4-5"
 
 _TASK_ACTIONS = {"create", "update", "close"}
 _MEMORY_ACTIONS = {"create", "update"}
 
-
-def _null() -> dict:
-    return {"task": None, "memory": None, "confirm_pending": False}
+_MSG_CAP = 1000      # макс. символов на сообщение контекста
+_RECENT_LIMIT = 12   # сколько последних сообщений отдаём
 
 
 def _strip_fences(text: str) -> str:
-    """Срезает markdown-обёртку ```json ... ```, если модель её добавила."""
     m = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     return m.group(1).strip() if m else text.strip()
-
-
-def _build_user_input(user_message, active_tasks, relevant_memory, pending_suggestion) -> str:
-    parts = [
-        f"<USER_MESSAGE>\n{user_message}\n</USER_MESSAGE>",
-        "<ACTIVE_TASKS>\n" + json.dumps(active_tasks, ensure_ascii=False) + "\n</ACTIVE_TASKS>",
-        "<EXISTING_MEMORY>\n" + json.dumps(relevant_memory, ensure_ascii=False) + "\n</EXISTING_MEMORY>",
-    ]
-    if pending_suggestion:
-        parts.append(
-            "<PENDING_SUGGESTION>\n" + json.dumps(pending_suggestion, ensure_ascii=False) + "\n</PENDING_SUGGESTION>"
-        )
-    return "\n\n".join(parts)
 
 
 def _valid_task(t):
@@ -49,13 +33,13 @@ def _valid_task(t):
         return None
     action = t.get("action")
     if action not in _TASK_ACTIONS:
-        log.error("classifier: bad task action %r", action)
+        log.error("memory composer: bad task action %r", action)
         return None
     if action in ("update", "close") and not t.get("id"):
-        log.error("classifier: task %s without id", action)
+        log.error("memory composer: task %s without id", action)
         return None
     if action == "create" and not (t.get("title") or "").strip():
-        log.error("classifier: task create without title")
+        log.error("memory composer: task create without title")
         return None
     return t
 
@@ -65,28 +49,43 @@ def _valid_memory(m):
         return None
     action = m.get("action")
     if action not in _MEMORY_ACTIONS:
-        log.error("classifier: bad memory action %r", action)
+        log.error("memory composer: bad memory action %r", action)
         return None
     if action == "update" and not m.get("id"):
-        log.error("classifier: memory update without id")
+        log.error("memory composer: memory update without id")
         return None
     if action == "create" and not (m.get("title") or "").strip():
-        log.error("classifier: memory create without title")
+        log.error("memory composer: memory create without title")
         return None
     return m
 
 
-def classify_message(client, user_message, active_tasks, relevant_memory,
-                     pending_suggestion=None) -> dict:
-    """Возвращает {"task": ..|None, "memory": ..|None, "confirm_pending": bool}.
-    Fail-open: при любой ошибке — всё None/False."""
-    if not user_message or not user_message.strip():
-        return _null()
+def _build_input(save_text, recent_messages, existing_memory, active_tasks) -> str:
+    parts = [f"<SAVE_REQUEST>\n{save_text}\n</SAVE_REQUEST>"]
+    if recent_messages:
+        lines = []
+        for mmsg in recent_messages[-_RECENT_LIMIT:]:
+            label = "Пользователь" if mmsg.get("role") == "user" else "CoS"
+            content = (mmsg.get("content") or "")[:_MSG_CAP]
+            lines.append(f"{label}: {content}")
+        parts.append("<RECENT_CONTEXT>\n" + "\n".join(lines) + "\n</RECENT_CONTEXT>")
+    parts.append("<EXISTING_MEMORY>\n" + json.dumps(existing_memory or [], ensure_ascii=False) + "\n</EXISTING_MEMORY>")
+    parts.append("<ACTIVE_TASKS>\n" + json.dumps(active_tasks or [], ensure_ascii=False) + "\n</ACTIVE_TASKS>")
+    return "\n\n".join(parts)
 
-    user_input = _build_user_input(user_message, active_tasks, relevant_memory, pending_suggestion)
+
+def compose_save(client, save_text, recent_messages=None, existing_memory=None,
+                 active_tasks=None) -> dict:
+    """Структурирует явный запрос на сохранение. Возвращает {"task": ..|None,
+    "memory": ..|None}. Fail-safe: при любой ошибке/нехватке данных — оба None."""
+    null = {"task": None, "memory": None}
+    if not (save_text or "").strip():
+        return null
+
+    user_input = _build_input(save_text, recent_messages, existing_memory, active_tasks)
     try:
         response = client.messages.create(
-            model=CLASSIFIER_MODEL,
+            model=COMPOSER_MODEL,
             max_tokens=1024,
             temperature=0,
             system=MEMORY_CLASSIFIER_SYSTEM_PROMPT,
@@ -94,20 +93,19 @@ def classify_message(client, user_message, active_tasks, relevant_memory,
         )
         raw = "".join(b.text for b in response.content if b.type == "text")
     except Exception:
-        log.exception("classifier: API call failed")
-        return _null()
+        log.exception("memory composer: API call failed")
+        return null
 
     try:
         data = json.loads(_strip_fences(raw))
     except (json.JSONDecodeError, ValueError):
-        log.error("classifier: invalid JSON. Raw response: %s", raw)
-        return _null()
+        log.error("memory composer: invalid JSON. Raw response: %s", raw)
+        return null
     if not isinstance(data, dict):
-        log.error("classifier: response is not an object: %s", data)
-        return _null()
+        log.error("memory composer: response is not an object: %s", data)
+        return null
 
     return {
         "task": _valid_task(data["task"]) if data.get("task") else None,
         "memory": _valid_memory(data["memory"]) if data.get("memory") else None,
-        "confirm_pending": bool(data.get("confirm_pending")),
     }

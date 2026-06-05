@@ -1035,6 +1035,7 @@ def import_chat(chat_id: str, title: str, pinned: bool, model: str,
 _SETTING_DEFAULTS = {
     "tts_voice": "ru-RU-SvetlanaNeural",
     "voice_enabled": "true",
+    "memory_autosave": "false",
 }
 
 

@@ -19,6 +19,9 @@
     .mem-suggestion-confirm { margin-top: 4px; padding: 6px 14px; border: 1px solid var(--cyan); background: rgba(0, 240, 255, .08); color: var(--cyan); font-family: var(--f-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); }
     .mem-suggestion-confirm:hover { background: rgba(0, 240, 255, .16); }
     .mem-suggestion-confirm:disabled { opacity: .5; cursor: default; }
+    .mem-suggestion-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .mem-suggestion-always { border-color: var(--line-2); color: var(--ink-2); background: transparent; }
+    .mem-suggestion-always:hover { border-color: var(--cyan); color: var(--cyan); background: rgba(0, 240, 255, .08); }
     .mem-suggestion-saved { color: var(--cyan); font-size: 11px; }
     .mem-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(12px); background: rgba(15, 16, 48, .96); border: 1px solid var(--cyan); color: var(--cyan); font-family: var(--f-mono); font-size: 11px; padding: 8px 16px; z-index: 300; opacity: 0; transition: opacity .25s, transform .25s; clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
     .mem-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -813,22 +816,35 @@
       const box = document.createElement("div");
       box.className = "mem-suggestion";
       box.innerHTML = html;
-      const btn = document.createElement("button");
-      btn.className = "mem-suggestion-confirm";
-      btn.textContent = "✓ Подтвердить";
-      btn.addEventListener("click", () => confirmSuggestion(box, btn));
-      box.appendChild(btn);
+      const actions = document.createElement("div");
+      actions.className = "mem-suggestion-actions";
+      const btnOnce = document.createElement("button");
+      btnOnce.className = "mem-suggestion-confirm";
+      btnOnce.textContent = "✓ Подтвердить разово";
+      btnOnce.addEventListener("click", () => confirmSuggestion(box, false));
+      const btnAlways = document.createElement("button");
+      btnAlways.className = "mem-suggestion-confirm mem-suggestion-always";
+      btnAlways.textContent = "Подтверждать всегда";
+      btnAlways.addEventListener("click", () => confirmSuggestion(box, true));
+      actions.appendChild(btnOnce);
+      actions.appendChild(btnAlways);
+      box.appendChild(actions);
       host.appendChild(box);
     }
 
-    async function confirmSuggestion(box, btn) {
+    async function confirmSuggestion(box, always) {
       if (!pendingSuggestion) return;
       const sug = pendingSuggestion;
       pendingSuggestion = null;        // защита от двойного применения
-      btn.disabled = true;
+      box.querySelectorAll("button").forEach((b) => (b.disabled = true));
       try {
         await api("POST", "/api/suggestion/apply", sug);
-        box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено</div>';
+        if (always) {
+          await api("PATCH", "/api/settings", { memory_autosave: "true" });
+          box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено. Дальше сохраняю автоматически.</div>';
+        } else {
+          box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено</div>';
+        }
       } catch {
         box.innerHTML = '<div class="mem-suggestion-saved">Ошибка сохранения</div>';
       }
@@ -918,15 +934,11 @@
       inputEl.value = "";
       inputEl.style.height = "auto";
 
-      // pending_suggestion шлём ТОЛЬКО если оно ещё активно (юзер не подтвердил
-      // кнопкой). Затем гасим его локально — предложение «протухает».
-      const sug = pendingSuggestion;
+      // Непод­тверждённое предложение протухает при новом сообщении.
       pendingSuggestion = null;
       document.querySelector(".mem-suggestion")?.remove();
-      const body = { chat_id: currentId, model: meta?.model };
-      if (sug) body.pending_suggestion = sug;
 
-      await streamAssistant("/chat/stream", body);
+      await streamAssistant("/chat/stream", { chat_id: currentId, model: meta?.model });
     }
 
     sendBtn.addEventListener("click", send);

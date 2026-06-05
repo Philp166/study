@@ -72,6 +72,31 @@
         </div>
       </section>
 
+      <!-- ── Память ── -->
+      <section class="settings-card">
+        <h2 class="settings-card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="6" r="1.6"/><circle cx="5" cy="18" r="1.6"/><circle cx="19" cy="18" r="1.6"/><line x1="6.4" y1="7" x2="10.2" y2="10.7"/><line x1="17.6" y1="7" x2="13.8" y2="10.7"/><line x1="6.4" y1="17" x2="10.2" y2="13.3"/><line x1="17.6" y1="17" x2="13.8" y2="13.3"/>
+          </svg>
+          Память
+        </h2>
+
+        <div class="settings-row">
+          <div class="settings-label">
+            Сохранять в память автоматически
+            <div style="font-size:11px;color:var(--ink-2);margin-top:3px;max-width:340px">
+              Когда выключено — агент показывает карточку «Подтвердить» в чате. Включено — сохраняет сразу, без подтверждения. На все чаты.
+            </div>
+          </div>
+          <div class="settings-control">
+            <label class="wakeword-switch">
+              <input type="checkbox" id="mem-autosave" />
+              <span class="wakeword-slider"></span>
+            </label>
+          </div>
+        </div>
+      </section>
+
       <!-- ── Token Usage ── -->
       <section class="settings-card">
         <h2 class="settings-card-title">
@@ -138,6 +163,7 @@
     const wwEnabledCb = document.getElementById("ww-enabled");
     const wwPhraseInput = document.getElementById("ww-phrase");
     const ttsSelect = document.getElementById("tts-voice");
+    const memAutosaveCb = document.getElementById("mem-autosave");
 
     // Wake word — localStorage
     wwEnabledCb.checked = localStorage.getItem("cos_wakeword_enabled") === "true";
@@ -193,6 +219,11 @@
         api("PATCH", "/api/settings", { tts_voice: ttsSelect.value });
       });
 
+      // Автосохранение памяти
+      memAutosaveCb.checked = settings.memory_autosave === "true";
+      memAutosaveCb.addEventListener("change", () => {
+        api("PATCH", "/api/settings", { memory_autosave: memAutosaveCb.checked ? "true" : "false" });
+      });
     }
 
     /* ── Token Usage ── */

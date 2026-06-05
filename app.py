@@ -32,9 +32,7 @@ log = logging.getLogger("cos.branch")
 
 import anthropic
 
-from concurrent.futures import ThreadPoolExecutor
-
-from agent import Agent
+from agent import Agent, MEMORY_TOOLS
 import db
 import summarizer
 import memory_classifier
@@ -44,10 +42,6 @@ if not os.getenv("ANTHROPIC_API_KEY"):
 
 client = anthropic.Anthropic()
 cos_agent = Agent(client)
-
-# Пул для субагента-классификатора памяти: гоняется ПАРАЛЛЕЛЬНО стриму главного
-# агента, чтобы не задерживать ответ. Классификатор синхронный (как facts_extractor).
-_classifier_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mem-classifier")
 
 db.init_db()
 
@@ -243,10 +237,6 @@ class ChatRequest(BaseModel):
 class StreamRequest(BaseModel):
     chat_id: str
     model: str | None = None
-    # Предыдущее неподтверждённое предложение памяти (если на фронте оно ещё
-    # активно). Шлётся ТОЛЬКО когда юзер не подтвердил кнопкой — защита от
-    # двойного применения. Классификатор по нему детектит словесное «да».
-    pending_suggestion: dict | None = None
 
 
 class VoiceChatRequest(BaseModel):
@@ -407,7 +397,7 @@ def api_get_settings():
 
 @app.patch("/api/settings")
 def api_update_settings(updates: dict):
-    allowed = {"tts_voice", "voice_enabled"}
+    allowed = {"tts_voice", "voice_enabled", "memory_autosave"}
     for key, value in updates.items():
         if key in allowed:
             db.set_setting(key, str(value))
@@ -699,19 +689,18 @@ def api_migrate(req: MigrateRequest):
 
 def _stream_chat_response(chat_id: str, model: str,
                           user_message_id: int | None,
-                          user_message_text: str | None,
-                          pending_suggestion: dict | None = None) -> StreamingResponse:
+                          user_message_text: str | None) -> StreamingResponse:
     """Общий конвейер ответа агента для обычной отправки и для ветвления.
 
-    Контекст собирается по активной ветке (leaf = user_message_id — это
-    сообщение, на которое отвечаем). Ответ ассистента сохраняется с
-    parent_message_id = user_message_id НАПРЯМУЮ, без повторного чтения
-    current_leaf после стрима — это защищает от смены ветки во время стрима.
+    Контекст собирается по активной ветке (leaf = user_message_id). Ответ
+    ассистента сохраняется с parent_message_id = user_message_id напрямую.
 
-    Параллельно стриму запускается субагент-классификатор памяти (Haiku):
-    после ответа он либо предлагает сохранить что-то (event memory_suggestion),
-    либо — если есть pending_suggestion и юзер подтвердил словами — применяет
-    его и шлёт suggestion_applied. Классификатор fail-open и НЕ влияет на ответ.
+    Память: агент сам решает, когда сохранить, и зовёт инструмент `remember`
+    (только по явной просьбе пользователя). Инструмент гоняет субагент-композер
+    (Haiku), который структурирует заметку/задачу. memory_autosave включён —
+    пишем сразу (event suggestion_applied), иначе показываем карточку
+    подтверждения (event memory_suggestion). Память также инжектится в
+    системпромпт для чтения.
     """
     system_prompt, messages = summarizer.prepare_context(
         client, model, chat_id,
@@ -722,29 +711,40 @@ def _stream_chat_response(chat_id: str, model: str,
     )
 
     def generate():
-        # Классификатор стартует ДО стрима и крутится в потоке параллельно.
-        classifier_fut = None
-        if user_message_text and user_message_text.strip():
-            try:
-                active_tasks = [
-                    {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
-                    for t in db.list_tasks(status="active")
-                ]
-                relevant = db.relevant_memory(user_message_text)
-                classifier_fut = _classifier_pool.submit(
-                    memory_classifier.classify_message,
-                    client, user_message_text, active_tasks, relevant, pending_suggestion,
-                )
-            except Exception:
-                log.exception("classifier submit failed for chat %s", chat_id)
+        applied = []       # автосохранённые записи (тост)
+        suggestions = []   # отложенные на подтверждение (карточка)
+
+        def tool_handler(name, tool_input):
+            if name != "remember":
+                return "Неизвестный инструмент."
+            text = ((tool_input or {}).get("text") or "").strip()
+            if not text:
+                return "Пустой запрос — нечего сохранять."
+            recent = db.get_branch_history(chat_id, user_message_id)
+            existing = db.relevant_memory(text)
+            active = [
+                {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
+                for t in db.list_tasks(status="active")
+            ]
+            verdict = memory_classifier.compose_save(client, text, recent, existing, active)
+            task, memory = verdict.get("task"), verdict.get("memory")
+            if not task and not memory:
+                return "Не удалось выделить конкретику — ничего не сохранил. Уточни, что именно записать."
+            if db.get_setting("memory_autosave", "false") == "true":
+                applied.append(_apply_suggestion(task, memory))
+                return "Сохранено в память."
+            suggestions.append({"task": task, "memory": memory})
+            return "Подготовил запись и показал пользователю карточку подтверждения."
 
         full_text = ""
         try:
-            for chunk in cos_agent.respond_stream(messages, model=model, system_prompt=system_prompt):
+            for chunk in cos_agent.respond_stream(
+                messages, model=model, system_prompt=system_prompt,
+                tools=MEMORY_TOOLS, tool_handler=tool_handler,
+            ):
                 full_text += chunk
                 yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
-            # parent = id user-сообщения, зафиксированный до стрима;
-            # add_message также двигает current_leaf на id ответа.
+
             assistant_id = db.add_message(
                 chat_id, "assistant", full_text,
                 parent_message_id=user_message_id,
@@ -763,21 +763,11 @@ def _stream_chat_response(chat_id: str, model: str,
             }
             yield f"data: {json.dumps(usage_data)}\n\n"
 
-            # Результат классификатора (стрим обычно дольше, чем один вызов Haiku).
-            if classifier_fut is not None:
-                try:
-                    verdict = classifier_fut.result(timeout=15)
-                except Exception:
-                    log.exception("classifier future failed for chat %s", chat_id)
-                    verdict = None
-                if verdict:
-                    if verdict.get("confirm_pending") and pending_suggestion:
-                        saved = _apply_suggestion(
-                            pending_suggestion.get("task"), pending_suggestion.get("memory")
-                        )
-                        yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
-                    elif verdict.get("task") or verdict.get("memory"):
-                        yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': verdict.get('task'), 'memory': verdict.get('memory')})}\n\n"
+            for saved in applied:
+                yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
+            if suggestions:
+                last = suggestions[-1]
+                yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': last['task'], 'memory': last['memory']})}\n\n"
 
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
@@ -797,10 +787,7 @@ async def chat_stream(req: StreamRequest):
     leaf = chat.get("current_leaf_message_id")
     user_message = msgs[-1]["content"] if msgs and msgs[-1]["role"] == "user" else None
 
-    return _stream_chat_response(
-        req.chat_id, model, leaf, user_message,
-        pending_suggestion=req.pending_suggestion,
-    )
+    return _stream_chat_response(req.chat_id, model, leaf, user_message)
 
 
 @app.post("/api/chats/{chat_id}/branch")

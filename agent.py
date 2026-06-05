@@ -114,6 +114,12 @@ SYSTEM_PROMPT = """Ты — CoS (Chief of Staff), персональный оп�
 Если в памяти есть релевантная информация — используй. Если нет — не выдумывай. Отсутствие факта в срезе ≠ отсутствие в памяти (срез ограничен токен-бюджетом, показываются только релевантные заметки).
 Если пользователь спрашивает что-то, что ДОЛЖНО быть в памяти, но ты не видишь — скажи честно: "В моей текущей памяти этого нет, но я мог не подгрузить. Напомни, пожалуйста."
 
+### Как сохранять в память (инструмент remember)
+Сам ты в память НЕ пишешь напрямую. Чтобы что-то сохранить, ты вызываешь инструмент `remember` — отдельный модуль превратит твой текст в аккуратную заметку или задачу (со связями [[...]] и папкой) и сохранит.
+- Вызывай `remember` ТОЛЬКО когда пользователь явно просит запомнить/сохранить/записать/отметить ("запомни", "сохрани это", "заполни память", "запиши задачу", "отметь, что сделано"). НЕ вызывай по своей инициативе в обычном разговоре.
+- В аргумент `text` клади СУТЬ своими словами, со всеми деталями из контекста (имена, роли, проект, решение, дедлайн) — модуль на это опирается.
+- НЕ заявляй "записал/сохранил", пока инструмент не вернул успех. Если он вернул, что сохранять нечего или ждёт подтверждения — так и передай пользователю, не выдумывай.
+
 ## Как ты общаешься
 - Язык: русский. Технические термины можно оставлять на английском (sprint, backlog, deploy).
 - Тон адаптивный: в деловых вопросах — чётко и по делу, в брейнсторме — свободно и креативно.
@@ -123,6 +129,34 @@ SYSTEM_PROMPT = """Ты — CoS (Chief of Staff), персональный оп�
 - Не начинай каждый ответ с приветствия или "Конечно!" — сразу к делу.
 - НЕ используй эмодзи в ответах. Исключение — только если пользователь явно попросил добавить эмодзи в текст.
 """
+
+
+# Инструмент сохранения в память/задачи. Агент зовёт его ТОЛЬКО по явной просьбе
+# пользователя; фактическую структуризацию и запись делает субагент-классификатор.
+MEMORY_TOOLS = [
+    {
+        "name": "remember",
+        "description": (
+            "Сохранить информацию в долговременную память или буфер задач пользователя. "
+            "Вызывай ТОЛЬКО когда пользователь явно просит запомнить/сохранить/записать "
+            "что-то или отметить задачу. НЕ вызывай в обычном разговоре. Передай суть "
+            "своими словами со всеми деталями из контекста (имена, роли, проект, решение, "
+            "дедлайн) — отдельный модуль превратит это в аккуратную заметку/задачу со связями."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Что сохранить, своими словами, со всей сутью из контекста.",
+                },
+            },
+            "required": ["text"],
+        },
+    }
+]
+
+MAX_TOOL_ITERATIONS = 6
 
 
 class Agent:
@@ -212,16 +246,46 @@ class Agent:
             block.text for block in response.content if block.type == "text"
         )
 
-    def respond_stream(self, messages: list[dict], *, model=None, max_tokens=None, system_prompt=None):
-        """Генератор: yields текстовые чанки по мере генерации."""
+    def respond_stream(self, messages: list[dict], *, model=None, max_tokens=None,
+                       system_prompt=None, tools=None, tool_handler=None):
+        """Генератор: yields текстовые чанки по мере генерации.
+
+        Если переданы tools + tool_handler — гоняет tool-use цикл: модель зовёт
+        инструмент → tool_handler(name, input) -> str выполняет его → результат
+        возвращается модели, и она продолжает ответ. Без tools — прежнее поведение.
+        """
         system, prepared = self._prepare(messages, system_prompt=system_prompt)
-        with self.client.messages.stream(
-            model=model or self.model,
-            max_tokens=max_tokens or self.max_tokens,
-            system=system,
-            messages=prepared,
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
-            final = stream.get_final_message()
+        base_kwargs = {
+            "model": model or self.model,
+            "max_tokens": max_tokens or self.max_tokens,
+            "system": system,
+        }
+        if tools:
+            base_kwargs["tools"] = tools
+
+        convo = prepared
+        for _ in range(MAX_TOOL_ITERATIONS):
+            with self.client.messages.stream(messages=convo, **base_kwargs) as stream:
+                for text in stream.text_stream:
+                    yield text
+                final = stream.get_final_message()
             self.token_stats.update(self._extract_usage(final))
+
+            if final.stop_reason != "tool_use" or not tool_handler:
+                break
+
+            # Модель вызвала инструмент(ы): выполняем и возвращаем результаты.
+            convo = convo + [{"role": "assistant", "content": final.content}]
+            results = []
+            for block in final.content:
+                if getattr(block, "type", None) == "tool_use":
+                    try:
+                        out = tool_handler(block.name, block.input)
+                    except Exception:
+                        out = "Ошибка при выполнении инструмента."
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": out if isinstance(out, str) else str(out),
+                    })
+            convo = convo + [{"role": "user", "content": results}]
