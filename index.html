@@ -9,6 +9,20 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
+  <style>
+    /* Блок-предложение памяти под ответом ассистента (Фаза 3) — приглушённый */
+    .mem-suggestion { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line-2); background: rgba(107, 92, 255, .05); font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-1); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
+    .mem-suggestion-title { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); margin-bottom: 8px; }
+    .mem-suggestion-item { margin-bottom: 8px; line-height: 1.5; }
+    .mem-suggestion-tag { display: inline-block; padding: 1px 6px; border: 1px solid var(--line-2); color: var(--cyan); font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; margin-right: 6px; }
+    .mem-suggestion-body { color: var(--ink-2); font-size: 11px; margin-top: 3px; }
+    .mem-suggestion-confirm { margin-top: 4px; padding: 6px 14px; border: 1px solid var(--cyan); background: rgba(0, 240, 255, .08); color: var(--cyan); font-family: var(--f-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px); }
+    .mem-suggestion-confirm:hover { background: rgba(0, 240, 255, .16); }
+    .mem-suggestion-confirm:disabled { opacity: .5; cursor: default; }
+    .mem-suggestion-saved { color: var(--cyan); font-size: 11px; }
+    .mem-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(12px); background: rgba(15, 16, 48, .96); border: 1px solid var(--cyan); color: var(--cyan); font-family: var(--f-mono); font-size: 11px; padding: 8px 16px; z-index: 300; opacity: 0; transition: opacity .25s, transform .25s; clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
+    .mem-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script src="/agent.js"></script>
@@ -279,6 +293,7 @@
     let currentTree = [];       // все сообщения чата [{id, role, content, parent_message_id}]
     let currentLeaf = null;     // current_leaf_message_id активной ветки
     let streaming = false;      // идёт стрим ответа — блокирует повторную отправку
+    let pendingSuggestion = null; // неподтверждённое предложение памяти {task, memory} (Фаза 3)
 
     const FORK_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
 
@@ -487,6 +502,7 @@
       if (currentMessages.length === 0) { showEmptyState(); return; }
       const pathSet = activePathSet();
       for (const m of currentMessages) renderBubble(m, pathSet);
+      if (pendingSuggestion) renderSuggestionBlock();
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
 
@@ -777,6 +793,13 @@
                 transcriptEl.scrollTop = transcriptEl.scrollHeight;
               }
               if (data.type === "usage") updateTokenPanel(data);
+              if (data.type === "memory_suggestion") {
+                if (data.task || data.memory) pendingSuggestion = { task: data.task || null, memory: data.memory || null };
+              }
+              if (data.type === "suggestion_applied") {
+                pendingSuggestion = null;
+                memToast("✓ Сохранено в память");
+              }
               if (data.type === "done" && data.leaf_message_id != null) currentLeaf = data.leaf_message_id;
               if (data.type === "error") typingEl.textContent = "Ошибка: " + data.message;
             } catch {}
@@ -795,6 +818,69 @@
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
         inputEl.focus();
       }
+    }
+
+    /* ── Предложение памяти (Фаза 3) ── */
+    function _sugEsc(s) {
+      const d = document.createElement("div");
+      d.textContent = s == null ? "" : String(s);
+      return d.innerHTML;
+    }
+
+    function renderSuggestionBlock() {
+      if (!pendingSuggestion) return;
+      const bodies = transcriptEl.querySelectorAll(".msg-wrap.bot .msg-body");
+      const host = bodies[bodies.length - 1];
+      if (!host) return;
+      const { task, memory } = pendingSuggestion;
+      let html = '<div class="mem-suggestion-title">📝 Предлагаю сохранить:</div>';
+      if (task) {
+        const verb = task.action === "close" ? "Закрыть задачу"
+          : task.action === "update" ? "Обновить задачу" : "Задача";
+        const body = task.outcome || task.context || "";
+        html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
+          + _sugEsc(task.title || ("#" + (task.id || "")))
+          + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
+      }
+      if (memory) {
+        const verb = memory.action === "update" ? "Обновить заметку" : "Память";
+        const folder = memory.folder ? ' → папка: ' + _sugEsc(memory.folder) : '';
+        const body = memory.content || "";
+        html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
+          + _sugEsc(memory.title || ("#" + (memory.id || ""))) + folder
+          + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
+      }
+      const box = document.createElement("div");
+      box.className = "mem-suggestion";
+      box.innerHTML = html;
+      const btn = document.createElement("button");
+      btn.className = "mem-suggestion-confirm";
+      btn.textContent = "✓ Подтвердить";
+      btn.addEventListener("click", () => confirmSuggestion(box, btn));
+      box.appendChild(btn);
+      host.appendChild(box);
+    }
+
+    async function confirmSuggestion(box, btn) {
+      if (!pendingSuggestion) return;
+      const sug = pendingSuggestion;
+      pendingSuggestion = null;        // защита от двойного применения
+      btn.disabled = true;
+      try {
+        await api("POST", "/api/suggestion/apply", sug);
+        box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено</div>';
+      } catch {
+        box.innerHTML = '<div class="mem-suggestion-saved">Ошибка сохранения</div>';
+      }
+    }
+
+    function memToast(text) {
+      const t = document.createElement("div");
+      t.className = "mem-toast";
+      t.textContent = text;
+      document.body.appendChild(t);
+      setTimeout(() => t.classList.add("show"), 10);
+      setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2500);
     }
 
     function showTyping() {
@@ -872,7 +958,15 @@
       inputEl.value = "";
       inputEl.style.height = "auto";
 
-      await streamAssistant("/chat/stream", { chat_id: currentId, model: meta?.model });
+      // pending_suggestion шлём ТОЛЬКО если оно ещё активно (юзер не подтвердил
+      // кнопкой). Затем гасим его локально — предложение «протухает».
+      const sug = pendingSuggestion;
+      pendingSuggestion = null;
+      document.querySelector(".mem-suggestion")?.remove();
+      const body = { chat_id: currentId, model: meta?.model };
+      if (sug) body.pending_suggestion = sug;
+
+      await streamAssistant("/chat/stream", body);
     }
 
     sendBtn.addEventListener("click", send);

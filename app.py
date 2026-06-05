@@ -32,15 +32,22 @@ log = logging.getLogger("cos.branch")
 
 import anthropic
 
+from concurrent.futures import ThreadPoolExecutor
+
 from agent import Agent
 import db
 import summarizer
+import memory_classifier
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     raise SystemExit("Открой файл .env и вставь свой ключ в строку ANTHROPIC_API_KEY=")
 
 client = anthropic.Anthropic()
 cos_agent = Agent(client)
+
+# Пул для субагента-классификатора памяти: гоняется ПАРАЛЛЕЛЬНО стриму главного
+# агента, чтобы не задерживать ответ. Классификатор синхронный (как facts_extractor).
+_classifier_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mem-classifier")
 
 db.init_db()
 
@@ -236,6 +243,10 @@ class ChatRequest(BaseModel):
 class StreamRequest(BaseModel):
     chat_id: str
     model: str | None = None
+    # Предыдущее неподтверждённое предложение памяти (если на фронте оно ещё
+    # активно). Шлётся ТОЛЬКО когда юзер не подтвердил кнопкой — защита от
+    # двойного применения. Классификатор по нему детектит словесное «да».
+    pending_suggestion: dict | None = None
 
 
 class VoiceChatRequest(BaseModel):
@@ -525,6 +536,61 @@ def api_memory_folders():
     return db.get_memory_folders()
 
 
+def _apply_suggestion(task, memory) -> dict:
+    """Применяет предложение классификатора к БД. Используется и кнопкой
+    подтверждения (эндпоинт ниже), и словесным «да» (в стриме). Если memory.create
+    с уже занятым title — пропускаем и сообщаем (не дублируем)."""
+    saved = {"task": False, "memory": False, "memory_skipped": None}
+    if isinstance(task, dict):
+        a = task.get("action")
+        if a == "create" and (task.get("title") or "").strip():
+            db.create_task(title=task["title"].strip(), context=task.get("context") or "")
+            saved["task"] = True
+        elif a == "update" and task.get("id"):
+            fields = {}
+            if task.get("context") is not None:
+                fields["context"] = task["context"]
+            if (task.get("title") or "").strip():
+                fields["title"] = task["title"].strip()
+            if fields:
+                db.update_task(task["id"], **fields)
+            saved["task"] = True
+        elif a == "close" and task.get("id"):
+            db.update_task(task["id"], status="completed", outcome=task.get("outcome") or "")
+            saved["task"] = True
+    if isinstance(memory, dict):
+        a = memory.get("action")
+        if a == "create" and (memory.get("title") or "").strip():
+            row = db.create_memory(
+                title=memory["title"].strip(),
+                content=memory.get("content") or "",
+                folder=_norm_folder(memory.get("folder")),
+            )
+            if row is None:
+                saved["memory_skipped"] = "title_exists"
+            else:
+                saved["memory"] = True
+        elif a == "update" and memory.get("id"):
+            fields = {}
+            if memory.get("content") is not None:
+                fields["content"] = memory["content"]
+            if (memory.get("title") or "").strip():
+                fields["title"] = memory["title"].strip()
+            if "folder" in memory:
+                fields["folder"] = _norm_folder(memory.get("folder"))
+            if fields:
+                db.update_memory(memory["id"], **fields)
+            saved["memory"] = True
+    return saved
+
+
+@app.post("/api/suggestion/apply")
+def api_apply_suggestion(body: dict):
+    """Применить предложение памяти (кнопка «Подтвердить» на фронте)."""
+    saved = _apply_suggestion(body.get("task"), body.get("memory"))
+    return {"ok": True, "saved": saved}
+
+
 @app.get("/api/memory/{memory_id}")
 def api_get_memory(memory_id: int):
     row = db.get_memory(memory_id)
@@ -627,13 +693,19 @@ def api_migrate(req: MigrateRequest):
 
 def _stream_chat_response(chat_id: str, model: str,
                           user_message_id: int | None,
-                          user_message_text: str | None) -> StreamingResponse:
+                          user_message_text: str | None,
+                          pending_suggestion: dict | None = None) -> StreamingResponse:
     """Общий конвейер ответа агента для обычной отправки и для ветвления.
 
     Контекст собирается по активной ветке (leaf = user_message_id — это
     сообщение, на которое отвечаем). Ответ ассистента сохраняется с
     parent_message_id = user_message_id НАПРЯМУЮ, без повторного чтения
     current_leaf после стрима — это защищает от смены ветки во время стрима.
+
+    Параллельно стриму запускается субагент-классификатор памяти (Haiku):
+    после ответа он либо предлагает сохранить что-то (event memory_suggestion),
+    либо — если есть pending_suggestion и юзер подтвердил словами — применяет
+    его и шлёт suggestion_applied. Классификатор fail-open и НЕ влияет на ответ.
     """
     system_prompt, messages = summarizer.prepare_context(
         client, model, chat_id,
@@ -643,6 +715,22 @@ def _stream_chat_response(chat_id: str, model: str,
     )
 
     def generate():
+        # Классификатор стартует ДО стрима и крутится в потоке параллельно.
+        classifier_fut = None
+        if user_message_text and user_message_text.strip():
+            try:
+                active_tasks = [
+                    {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
+                    for t in db.list_tasks(status="active")
+                ]
+                relevant = db.relevant_memory(user_message_text)
+                classifier_fut = _classifier_pool.submit(
+                    memory_classifier.classify_message,
+                    client, user_message_text, active_tasks, relevant, pending_suggestion,
+                )
+            except Exception:
+                log.exception("classifier submit failed for chat %s", chat_id)
+
         full_text = ""
         try:
             for chunk in cos_agent.respond_stream(messages, model=model, system_prompt=system_prompt):
@@ -667,6 +755,23 @@ def _stream_chat_response(chat_id: str, model: str,
                 "chat_totals": db.get_chat_usage(chat_id),
             }
             yield f"data: {json.dumps(usage_data)}\n\n"
+
+            # Результат классификатора (стрим обычно дольше, чем один вызов Haiku).
+            if classifier_fut is not None:
+                try:
+                    verdict = classifier_fut.result(timeout=15)
+                except Exception:
+                    log.exception("classifier future failed for chat %s", chat_id)
+                    verdict = None
+                if verdict:
+                    if verdict.get("confirm_pending") and pending_suggestion:
+                        saved = _apply_suggestion(
+                            pending_suggestion.get("task"), pending_suggestion.get("memory")
+                        )
+                        yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
+                    elif verdict.get("task") or verdict.get("memory"):
+                        yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': verdict.get('task'), 'memory': verdict.get('memory')})}\n\n"
+
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -685,7 +790,10 @@ async def chat_stream(req: StreamRequest):
     leaf = chat.get("current_leaf_message_id")
     user_message = msgs[-1]["content"] if msgs and msgs[-1]["role"] == "user" else None
 
-    return _stream_chat_response(req.chat_id, model, leaf, user_message)
+    return _stream_chat_response(
+        req.chat_id, model, leaf, user_message,
+        pending_suggestion=req.pending_suggestion,
+    )
 
 
 @app.post("/api/chats/{chat_id}/branch")

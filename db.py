@@ -1355,6 +1355,42 @@ def get_memory_folders() -> list[str]:
         return [r["folder"] for r in _fetchall(cur)]
 
 
+def relevant_memory(text: str, limit: int = 5) -> list[dict]:
+    """Релевантные активные заметки для классификатора памяти: поиск по ключевым
+    словам сообщения (OR LIKE по title/content). Если совпадений нет — последние
+    обновлённые. Возвращает [{id, title, content_preview}]."""
+    words = [w for w in re.findall(r"\w+", (text or "").lower()) if len(w) >= 4]
+    words = list(dict.fromkeys(words))[:8]  # уникальные, не больше 8
+    lim = max(1, int(limit))
+    with _connect() as conn:
+        rows = []
+        if words:
+            clauses, params = [], []
+            for w in words:
+                like = f"%{w}%"
+                clauses.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
+                params.extend([like, like])
+            cur = _execute(
+                conn,
+                f"SELECT id, title, content FROM long_term_memory "
+                f"WHERE status='active' AND ({' OR '.join(clauses)}) "
+                f"ORDER BY updated_at DESC LIMIT {lim}",
+                params,
+            )
+            rows = _fetchall(cur)
+        if not rows:
+            cur = _execute(
+                conn,
+                f"SELECT id, title, content FROM long_term_memory "
+                f"WHERE status='active' ORDER BY updated_at DESC LIMIT {lim}",
+            )
+            rows = _fetchall(cur)
+    return [
+        {"id": r["id"], "title": r["title"], "content_preview": (r["content"] or "")[:300]}
+        for r in rows
+    ]
+
+
 # ── Буфер задач (tasks) ──
 
 _TASK_FIELDS = {"title", "context", "outcome", "status"}
