@@ -167,6 +167,23 @@ VOICE_SYSTEM_ADDENDUM = """
 - Если тема требует развёрнутого ответа, предложи перейти в текстовый чат.
 """
 
+# Память в голосе: инструмент `remember` доступен (как в тексте), но карточки
+# подтверждения нет — подтверждение только голосом. Какой из блоков добавить к
+# системнику, решаем по настройке memory_autosave на каждый запрос.
+VOICE_MEMORY_AUTOSAVE_ON = """
+## Сохранение в память (голос, автосохранение ВКЛ)
+Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить задачу — сразу вызови инструмент `remember` (один вызов, суть своими словами со всеми деталями из контекста) и коротко подтверди вслух: «Сохранил». Не переспрашивай.
+"""
+
+VOICE_MEMORY_AUTOSAVE_OFF = """
+## Сохранение в память (голос, подтверждение голосом)
+Автосохранение выключено, а в голосе нет кнопок — подтверждаешь только голосом.
+Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить задачу:
+1. НЕ вызывай `remember` сразу. Сначала коротко переспроси вслух: «Сохранить это в память?».
+2. Вызови `remember` ТОЛЬКО если в следующей реплике пользователь подтвердил (например «да», «давай», «сохрани», «ага», «угу», «верно»). После сохранения скажи «Сохранил».
+3. Если пользователь отказался, передумал или сменил тему — ничего не сохраняй и `remember` не вызывай.
+"""
+
 
 def strip_markdown(text: str) -> str:
     """Убирает markdown-разметку, чтобы TTS не читал спецсимволы вслух."""
@@ -874,7 +891,13 @@ def memory_page():
 @app.post("/voice/chat/stream")
 async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
-    voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM
+    # Голос умеет писать в память тем же инструментом `remember`. Поведение зависит
+    # от memory_autosave: ВКЛ — пишем сразу и говорим «сохранил»; ВЫКЛ — сначала
+    # переспрашиваем голосом и сохраняем только после устного «да».
+    voice_autosave = db.get_setting("memory_autosave", "false") == "true"
+    voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM + (
+        VOICE_MEMORY_AUTOSAVE_ON if voice_autosave else VOICE_MEMORY_AUTOSAVE_OFF
+    )
 
     voice_user_id = None
     if req.chat_id:
@@ -896,6 +919,28 @@ async def voice_chat_stream(req: VoiceChatRequest):
         text_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
+        def voice_tool_handler(name, tool_input):
+            # Голос сохраняет НАПРЯМУЮ: карточки подтверждения нет, согласие даётся
+            # голосом (по промпту), поэтому к моменту вызова решение уже принято.
+            if name != "remember":
+                return "Неизвестный инструмент."
+            text = ((tool_input or {}).get("text") or "").strip()
+            if not text:
+                return "Пустой запрос — нечего сохранять."
+            recent = db.get_branch_history(req.chat_id, voice_user_id) if req.chat_id else messages
+            existing = db.relevant_memory(text)
+            active = [
+                {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
+                for t in db.list_tasks(status="active")
+            ]
+            verdict = memory_classifier.compose_save(client, text, recent, existing, active)
+            task, memory = verdict.get("task"), verdict.get("memory")
+            if not task and not memory:
+                return "Не удалось выделить конкретику — ничего не сохранил. Уточни, что именно записать."
+            saved = _apply_suggestion(task, memory)
+            loop.call_soon_threadsafe(text_queue.put_nowait, ("memory_saved", saved))
+            return "Сохранено в память."
+
         def run_claude():
             try:
                 for chunk in cos_agent.respond_stream(
@@ -903,6 +948,8 @@ async def voice_chat_stream(req: VoiceChatRequest):
                     model=VOICE_MODEL,
                     max_tokens=VOICE_MAX_TOKENS,
                     system_prompt=voice_system,
+                    tools=MEMORY_TOOLS,
+                    tool_handler=voice_tool_handler,
                 ):
                     loop.call_soon_threadsafe(text_queue.put_nowait, ("chunk", chunk))
             except Exception as e:
@@ -924,6 +971,10 @@ async def voice_chat_stream(req: VoiceChatRequest):
             if msg_type == "error":
                 yield f"data: {json.dumps({'type': 'error', 'message': data})}\n\n"
                 break
+
+            if msg_type == "memory_saved":
+                yield f"data: {json.dumps({'type': 'memory_saved', 'saved': data})}\n\n"
+                continue
 
             if msg_type == "end":
                 if sentence_buffer.strip():

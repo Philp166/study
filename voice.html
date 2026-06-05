@@ -9,6 +9,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .mem-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(12px); background: rgba(15, 16, 48, .96); border: 1px solid var(--cyan); color: var(--cyan); font-family: var(--f-mono); font-size: 11px; padding: 8px 16px; z-index: 300; opacity: 0; transition: opacity .25s, transform .25s; clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
+    .mem-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script src="/agent.js"></script>
@@ -164,6 +168,15 @@
 
     function renderMarkdown(text) {
       return DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
+    }
+
+    function memToast(text) {
+      const t = document.createElement("div");
+      t.className = "mem-toast";
+      t.textContent = text;
+      document.body.appendChild(t);
+      setTimeout(() => t.classList.add("show"), 10);
+      setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2500);
     }
 
     async function clearHistory() {
@@ -480,6 +493,10 @@
               if (data.type === "audio" && data.data) {
                 audioQueue.push(data.data);
                 drainAudio();
+              }
+
+              if (data.type === "memory_saved") {
+                memToast("✓ Сохранено в память");
               }
 
               if (data.type === "done") {
