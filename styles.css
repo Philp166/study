@@ -938,9 +938,6 @@ body.settings-page { display: flex; flex-direction: column; }
   .session-header .t-hud { display: none; }
   .session-header .t-display { font-size: 12px !important; }
 
-  /* ── Strategy popover ── */
-  .strategy-popover { right: 10px; left: 10px; width: auto; }
-
   /* ── Transcript ── */
   #transcript { padding: 4px 10px 10px; gap: 12px; }
 
