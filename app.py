@@ -676,6 +676,12 @@ def api_update_task(task_id: int, body: dict):
     return row
 
 
+@app.delete("/api/tasks/{task_id}")
+def api_delete_task(task_id: int):
+    db.delete_task(task_id)
+    return {"ok": True}
+
+
 @app.post("/api/migrate")
 def api_migrate(req: MigrateRequest):
     for c in req.chats:
@@ -892,6 +898,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
             voice_base,
             voice_user_id,
             user_message=req.text,
+            inject_memory=True,
         )
     else:
         messages = [{"role": m.role, "content": m.content} for m in req.messages]

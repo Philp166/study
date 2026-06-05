@@ -511,6 +511,13 @@ def init_db():
 
         _migrate(conn)
 
+        # Мёртвые таблицы откатанного графового модуля памяти (Фаза 5).
+        # Пустые и не используются; дропаем идемпотентно. Порядок: сначала
+        # рёбра/чанки, затем узлы (на случай FK от edges к nodes).
+        for _legacy in ("mem_edges", "mem_chunks", "mem_nodes"):
+            _execute(conn, f"DROP TABLE IF EXISTS {_legacy}")
+        conn.commit()
+
         # Migrate: ensure every existing chat has a strategy_settings row
         if _PG:
             _execute(
@@ -1457,3 +1464,10 @@ def update_task(task_id: int, **fields) -> dict | None:
         _execute(conn, f"UPDATE tasks SET {', '.join(sets)} WHERE id={_P}", vals)
         conn.commit()
     return get_task(task_id)
+
+
+def delete_task(task_id: int):
+    """Физическое удаление задачи."""
+    with _connect() as conn:
+        _execute(conn, f"DELETE FROM tasks WHERE id={_P}", (task_id,))
+        conn.commit()

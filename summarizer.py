@@ -197,22 +197,6 @@ def maybe_summarize(
     return new_summary
 
 
-# ── Sliding Window ──
-
-def apply_sliding_window(
-    messages: list[dict], window_size: int
-) -> list[dict]:
-    """Срезает историю до последних window_size сообщений, не разрывая пары."""
-    if len(messages) <= window_size:
-        return messages
-
-    idx = len(messages) - window_size
-    if messages[idx]["role"] == "assistant" and idx > 0:
-        idx -= 1
-
-    return messages[idx:]
-
-
 # ── Sticky Facts (extractor) ──
 
 def _strip_markdown_json(text: str) -> str:
@@ -403,8 +387,8 @@ def prepare_context(
     A. Достаём историю ветки и настройки
     B. Если sticky_facts_enabled и есть user_message — извлекаем факты (anchor=leaf)
     C. Если rolling_summary_enabled и порог превышен — суммаризатор (по ветке)
-    D. Если sliding_window_enabled — срезаем окно ветки
-    E. Собираем system prompt = base + summary(ветки) + facts(ветки)
+    E0. Если inject_memory — блоки долговременной памяти и активных задач
+    E. Собираем system prompt = base + память + задачи + summary(ветки) + facts(ветки)
     """
     settings = db.get_strategy_settings(chat_id)
     all_msgs = db.get_branch_history(chat_id, leaf_message_id)
@@ -424,12 +408,8 @@ def prepare_context(
         settings=settings,
     )
 
-    # D: Sliding Window — по истории ветки
+    # D: история ветки (Sliding Window убран в Фазе 5 — Rolling Summary его покрывает)
     messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-
-    if settings.get("sliding_window_enabled"):
-        window_size = settings.get("sliding_window_size", 20)
-        messages = apply_sliding_window(messages, window_size)
 
     # E0: Долговременная память + активные задачи (глобальные, между чатами).
     # Только для текстового пути (inject_memory=True). Память НЕ влияет на порог

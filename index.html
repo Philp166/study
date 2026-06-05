@@ -138,46 +138,8 @@
           </span>
           <div class="session-line"></div>
           <span class="t-hud" id="session-time"></span>
-          <button class="strategy-gear-btn" id="strategy-gear" type="button" title="Стратегии контекста">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
-            </svg>
-          </button>
         </div>
 
-        <!-- Strategy settings popover -->
-        <div class="strategy-popover" id="strategy-popover">
-          <div class="strategy-popover-title">Стратегии контекста</div>
-
-          <div class="strategy-section">
-            <div class="strategy-row">
-              <span class="strategy-name">Rolling Summary</span>
-              <label class="wakeword-switch"><input type="checkbox" id="stg-rolling-enabled" /><span class="wakeword-slider"></span></label>
-            </div>
-            <div class="strategy-param" id="stg-rolling-params">
-              <label class="strategy-param-label">Порог сжатия (%)</label>
-              <input type="number" class="strategy-input" id="stg-rolling-threshold" min="5" max="90" value="35" />
-            </div>
-          </div>
-
-          <div class="strategy-section">
-            <div class="strategy-row">
-              <span class="strategy-name">Sliding Window</span>
-              <label class="wakeword-switch"><input type="checkbox" id="stg-sliding-enabled" /><span class="wakeword-slider"></span></label>
-            </div>
-            <div class="strategy-param" id="stg-sliding-params">
-              <label class="strategy-param-label">Размер окна</label>
-              <input type="number" class="strategy-input" id="stg-sliding-size" min="5" max="100" value="20" />
-            </div>
-          </div>
-
-          <div class="strategy-section">
-            <div class="strategy-row">
-              <span class="strategy-name">Sticky Facts</span>
-              <label class="wakeword-switch"><input type="checkbox" id="stg-facts-enabled" /><span class="wakeword-slider"></span></label>
-            </div>
-          </div>
-        </div>
         <div id="transcript"></div>
         <div id="composer">
           <div class="quick-actions">
@@ -421,10 +383,8 @@
 
     async function switchChat(id) {
       currentId = id;
-      strategyLoaded = false;
       await loadCurrentChat();
       renderAll();
-      if (strategyPopover.classList.contains("open")) loadStrategySettings();
     }
 
     async function deleteChat(id) {
@@ -1075,97 +1035,6 @@
         else { w.className = ""; w.textContent = ""; }
       }
     }
-
-    /* ========================================================
-       Strategy Settings Popover
-       ======================================================== */
-    const strategyGearBtn = document.getElementById("strategy-gear");
-    const strategyPopover = document.getElementById("strategy-popover");
-
-    const stgRollingEnabled = document.getElementById("stg-rolling-enabled");
-    const stgRollingThreshold = document.getElementById("stg-rolling-threshold");
-    const stgSlidingEnabled = document.getElementById("stg-sliding-enabled");
-    const stgSlidingSize = document.getElementById("stg-sliding-size");
-    const stgFactsEnabled = document.getElementById("stg-facts-enabled");
-
-    const allStrategyToggles = [
-      { el: stgRollingEnabled, key: "rolling_summary_enabled" },
-      { el: stgSlidingEnabled, key: "sliding_window_enabled" },
-      { el: stgFactsEnabled,   key: "sticky_facts_enabled" },
-    ];
-
-    let strategyLoaded = false;
-
-    strategyGearBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const open = strategyPopover.classList.toggle("open");
-      if (open && !strategyLoaded) loadStrategySettings();
-    });
-
-    document.addEventListener("click", (e) => {
-      if (!strategyPopover.contains(e.target) && e.target !== strategyGearBtn) {
-        strategyPopover.classList.remove("open");
-      }
-    });
-
-    async function loadStrategySettings() {
-      if (!currentId) return;
-      try {
-        const s = await api("GET", `/api/chats/${currentId}/strategy-settings`);
-        stgRollingEnabled.checked = !!s.rolling_summary_enabled;
-        stgRollingThreshold.value = s.rolling_summary_threshold_pct || 35;
-        stgSlidingEnabled.checked = !!s.sliding_window_enabled;
-        stgSlidingSize.value = s.sliding_window_size || 20;
-        stgFactsEnabled.checked = !!s.sticky_facts_enabled;
-        strategyLoaded = true;
-      } catch {}
-    }
-
-    function patchStrategy(fields) {
-      if (!currentId) return;
-      api("PATCH", `/api/chats/${currentId}/strategy-settings`, fields).then(s => {
-        if (!s) return;
-        stgRollingEnabled.checked = !!s.rolling_summary_enabled;
-        stgSlidingEnabled.checked = !!s.sliding_window_enabled;
-        stgFactsEnabled.checked = !!s.sticky_facts_enabled;
-      });
-    }
-
-    function validateRange(input) {
-      const v = parseInt(input.value, 10);
-      const lo = parseInt(input.min, 10);
-      const hi = parseInt(input.max, 10);
-      if (isNaN(v) || v < lo || v > hi) {
-        input.classList.add("invalid");
-        return false;
-      }
-      input.classList.remove("invalid");
-      return true;
-    }
-
-    for (const t of allStrategyToggles) {
-      t.el.addEventListener("change", () => {
-        patchStrategy({ [t.key]: t.el.checked });
-      });
-    }
-
-    let stgDebounceRolling, stgDebounceSliding;
-
-    stgRollingThreshold.addEventListener("input", () => {
-      clearTimeout(stgDebounceRolling);
-      if (!validateRange(stgRollingThreshold)) return;
-      stgDebounceRolling = setTimeout(() => {
-        patchStrategy({ rolling_summary_threshold_pct: parseInt(stgRollingThreshold.value, 10) });
-      }, 500);
-    });
-
-    stgSlidingSize.addEventListener("input", () => {
-      clearTimeout(stgDebounceSliding);
-      if (!validateRange(stgSlidingSize)) return;
-      stgDebounceSliding = setTimeout(() => {
-        patchStrategy({ sliding_window_size: parseInt(stgSlidingSize.value, 10) });
-      }, 500);
-    });
 
     /* ========================================================
        Wake Word (UI in /settings, here only the detector)

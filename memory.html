@@ -522,7 +522,8 @@
         '<div class="dossier-field"><label>Статус</label><select id="t-status">' + sopts + "</select></div>" +
         '<div class="dossier-field"><label>Контекст</label><textarea id="t-context">' + escapeHtml(t.context) + "</textarea></div>" +
         '<div class="dossier-field" id="t-outcome-wrap"><label>Итог</label><textarea id="t-outcome">' + escapeHtml(t.outcome) + "</textarea></div>" +
-        '<div class="dossier-actions"><button id="t-save" class="btn btn-primary">Сохранить</button></div>' +
+        '<div class="dossier-actions"><button id="t-save" class="btn btn-primary">Сохранить</button>' +
+        '<button id="t-del" class="btn btn-danger">Удалить</button></div>' +
         '<div class="dossier-dates">Создано: ' + fmt(t.created_at) + "<br>Обновлено: " + fmt(t.updated_at) + "<br>Закрыто: " + fmt(t.closed_at) + "</div>";
 
       const statusEl = byId("t-status"), wrap = byId("t-outcome-wrap");
@@ -530,6 +531,7 @@
       statusEl.addEventListener("change", toggle);
       toggle();
       byId("t-save").addEventListener("click", saveTask);
+      byId("t-del").addEventListener("click", deleteTask);
       closeSidebar();
       openDossier();
     }
@@ -567,6 +569,16 @@
       };
       const r = await api("PATCH", "/api/tasks/" + currentTask.id, payload);
       if (r && r.error) { alert("Ошибка: " + r.error); return; }
+      closeDossier();
+      tasks = await api("GET", "/api/tasks");
+      if (!Array.isArray(tasks)) tasks = [];
+      renderSidebar();
+    }
+
+    async function deleteTask() {
+      if (!currentTask) return;
+      if (!confirm("Удалить задачу «" + currentTask.title + "»?")) return;
+      await api("DELETE", "/api/tasks/" + currentTask.id);
       closeDossier();
       tasks = await api("GET", "/api/tasks");
       if (!Array.isArray(tasks)) tasks = [];
