@@ -475,6 +475,133 @@ def api_delete_fact(chat_id: str, fact_id: int):
     return {"ok": True}
 
 
+# ── Долговременная память API ──
+# Тела запросов — простыми dict (как api_update_settings). Валидация enum'ов
+# и обязательных полей — здесь, в app-слое.
+
+MEMORY_CATEGORIES = {"person", "project", "tech", "decision", "preference", "general"}
+MEMORY_STATUSES = {"active", "inactive"}
+
+
+@app.get("/api/memory")
+def api_list_memory(category: str | None = None, q: str | None = None):
+    return db.list_memory(category=category, q=q)
+
+
+@app.post("/api/memory")
+def api_create_memory(body: dict):
+    title = (body.get("title") or "").strip()
+    if not title:
+        return JSONResponse(status_code=400, content={"error": "title_required"})
+    category = body.get("category") or "general"
+    if category not in MEMORY_CATEGORIES:
+        category = "general"
+    content = body.get("content") or ""
+    row = db.create_memory(title=title, content=content, category=category)
+    if row is None:
+        return JSONResponse(status_code=409, content={"error": "title_exists"})
+    return row
+
+
+# ВАЖНО: /search и /links регистрируются ДО /{memory_id}, иначе FastAPI поймает
+# их как memory_id и упадёт на валидации int (422).
+@app.get("/api/memory/search")
+def api_search_memory(q: str = ""):
+    return db.list_memory(q=q)
+
+
+@app.get("/api/memory/links")
+def api_memory_links():
+    return db.get_memory_links()
+
+
+@app.get("/api/memory/{memory_id}")
+def api_get_memory(memory_id: int):
+    row = db.get_memory(memory_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    return row
+
+
+@app.patch("/api/memory/{memory_id}")
+def api_update_memory(memory_id: int, body: dict):
+    clean = {}
+    if "title" in body:
+        title = (body["title"] or "").strip()
+        if not title:
+            return JSONResponse(status_code=400, content={"error": "title_empty"})
+        clean["title"] = title
+    if "content" in body:
+        clean["content"] = body["content"] or ""
+    if "category" in body:
+        if body["category"] not in MEMORY_CATEGORIES:
+            return JSONResponse(status_code=400, content={"error": "bad_category"})
+        clean["category"] = body["category"]
+    if "status" in body:
+        if body["status"] not in MEMORY_STATUSES:
+            return JSONResponse(status_code=400, content={"error": "bad_status"})
+        clean["status"] = body["status"]
+    row = db.update_memory(memory_id, **clean)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    return row
+
+
+@app.delete("/api/memory/{memory_id}")
+def api_delete_memory(memory_id: int):
+    db.delete_memory(memory_id)
+    return {"ok": True}
+
+
+# ── Задачи API ──
+
+TASK_STATUSES = {"active", "completed", "archived"}
+
+
+@app.get("/api/tasks")
+def api_list_tasks(status: str | None = None):
+    return db.list_tasks(status=status)
+
+
+@app.post("/api/tasks")
+def api_create_task(body: dict):
+    title = (body.get("title") or "").strip()
+    if not title:
+        return JSONResponse(status_code=400, content={"error": "title_required"})
+    context = body.get("context") or ""
+    return db.create_task(title=title, context=context)
+
+
+@app.get("/api/tasks/{task_id}")
+def api_get_task(task_id: int):
+    row = db.get_task(task_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    return row
+
+
+@app.patch("/api/tasks/{task_id}")
+def api_update_task(task_id: int, body: dict):
+    clean = {}
+    if "title" in body:
+        title = (body["title"] or "").strip()
+        if not title:
+            return JSONResponse(status_code=400, content={"error": "title_empty"})
+        clean["title"] = title
+    if "context" in body:
+        clean["context"] = body["context"] or ""
+    if "outcome" in body:
+        clean["outcome"] = body["outcome"] or ""
+    if "status" in body:
+        if body["status"] not in TASK_STATUSES:
+            return JSONResponse(status_code=400, content={"error": "bad_status"})
+        clean["status"] = body["status"]
+    row = db.update_task(task_id, **clean)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    return row
+
+
 @app.post("/api/migrate")
 def api_migrate(req: MigrateRequest):
     for c in req.chats:

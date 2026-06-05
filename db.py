@@ -10,6 +10,7 @@ DATABASE_URL задана → PostgreSQL (Render, прод).
 """
 
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -50,6 +51,13 @@ def _connect():
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # Встроенный SQLite LOWER() понижает регистр только ASCII — кириллицу не
+        # трогает, из-за чего поиск по русским словам с заглавной буквы не находит.
+        # Подменяем на юникод-корректный (PostgreSQL LOWER() и так юникодный).
+        conn.create_function(
+            "lower", 1, lambda s: s.lower() if isinstance(s, str) else s,
+            deterministic=True,
+        )
         try:
             yield conn
         finally:
@@ -88,6 +96,16 @@ def _insert_message(conn, chat_id: str, role: str, content: str, ts: float,
     else:
         cur = conn.execute(sql, (chat_id, role, content, ts, parent_message_id))
         return cur.lastrowid
+
+
+def _insert_returning_id(conn, sql, params):
+    """Вставка с возвратом нового id (кросс-СУБД)."""
+    if _PG:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql + " RETURNING id", params)
+        return cur.fetchone()["id"]
+    else:
+        return conn.execute(sql, params).lastrowid
 
 
 # ── Schema (для НОВЫХ БД создаются старые таблицы; _migrate() приводит к финалу) ──
@@ -162,6 +180,30 @@ CREATE TABLE IF NOT EXISTS chat_facts (
     updated_at DOUBLE PRECISION NOT NULL,
     UNIQUE(chat_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS long_term_memory (
+    id         SERIAL PRIMARY KEY,
+    title      TEXT NOT NULL,
+    content    TEXT NOT NULL DEFAULT '',
+    category   TEXT NOT NULL DEFAULT 'general',
+    status     TEXT NOT NULL DEFAULT 'active',
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ltm_category ON long_term_memory(category);
+CREATE INDEX IF NOT EXISTS idx_ltm_status   ON long_term_memory(status);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id         SERIAL PRIMARY KEY,
+    title      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'active',
+    context    TEXT NOT NULL DEFAULT '',
+    outcome    TEXT NOT NULL DEFAULT '',
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    closed_at  DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 """
 
 _SCHEMA_SQLITE = """
@@ -234,6 +276,30 @@ CREATE TABLE IF NOT EXISTS chat_facts (
     updated_at REAL NOT NULL,
     UNIQUE(chat_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS long_term_memory (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    content    TEXT NOT NULL DEFAULT '',
+    category   TEXT NOT NULL DEFAULT 'general',
+    status     TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ltm_category ON long_term_memory(category);
+CREATE INDEX IF NOT EXISTS idx_ltm_status   ON long_term_memory(status);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'active',
+    context    TEXT NOT NULL DEFAULT '',
+    outcome    TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    closed_at  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 """
 
 
@@ -1107,3 +1173,196 @@ def delete_chat_fact_by_id(fact_id: int):
     with _connect() as conn:
         _execute(conn, f"DELETE FROM chat_facts WHERE id={_P}", (fact_id,))
         conn.commit()
+
+
+# ── Долговременная память (long_term_memory) ──
+
+_MEMORY_FIELDS = {"title", "content", "category", "status"}
+
+# Wiki-ссылка [[Заголовок]] или [[Заголовок|алиас]] в markdown-теле заметки.
+_WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+_MEMORY_COLS = "id, title, content, category, status, created_at, updated_at"
+
+
+def list_memory(category: str | None = None, q: str | None = None) -> list[dict]:
+    """Активные заметки. Опц. фильтр по category и полнотекстовый поиск q
+    (LOWER(title) LIKE OR LOWER(content) LIKE). Сортировка: свежие сверху."""
+    where = ["status='active'"]
+    params: list = []
+    if category:
+        where.append(f"category={_P}")
+        params.append(category)
+    if q:
+        like = f"%{q.lower()}%"
+        where.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
+        params.extend([like, like])
+    sql = (
+        f"SELECT {_MEMORY_COLS} FROM long_term_memory "
+        f"WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
+    )
+    with _connect() as conn:
+        cur = _execute(conn, sql, params)
+        return _fetchall(cur)
+
+
+def get_memory(memory_id: int) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_MEMORY_COLS} FROM long_term_memory WHERE id={_P}",
+            (memory_id,),
+        )
+        return _fetchone(cur)
+
+
+def create_memory(title: str, content: str = "", category: str = "general") -> dict | None:
+    """Создаёт заметку. Если active-заметка с таким title уже есть → None (=409).
+    Проверка и вставка в одной транзакции (защита от гонки)."""
+    now = time.time()
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT id FROM long_term_memory WHERE status='active' AND title={_P}",
+            (title,),
+        )
+        if _fetchone(cur):
+            return None
+        new_id = _insert_returning_id(
+            conn,
+            f"INSERT INTO long_term_memory "
+            f"(title, content, category, status, created_at, updated_at) "
+            f"VALUES ({_P},{_P},{_P},'active',{_P},{_P})",
+            (title, content, category, now, now),
+        )
+        conn.commit()
+        cur = _execute(
+            conn,
+            f"SELECT {_MEMORY_COLS} FROM long_term_memory WHERE id={_P}",
+            (new_id,),
+        )
+        return _fetchone(cur)
+
+
+def update_memory(memory_id: int, **fields) -> dict | None:
+    """Whitelist {title, content, category, status}. Всегда обновляет updated_at.
+    Возвращает обновлённую запись или None, если id не найден."""
+    sets = []
+    vals = []
+    for k, v in fields.items():
+        if k not in _MEMORY_FIELDS:
+            continue
+        sets.append(f"{k}={_P}")
+        vals.append(v)
+    if not sets:
+        return get_memory(memory_id)
+    sets.append(f"updated_at={_P}")
+    vals.append(time.time())
+    vals.append(memory_id)
+    with _connect() as conn:
+        _execute(
+            conn,
+            f"UPDATE long_term_memory SET {', '.join(sets)} WHERE id={_P}",
+            vals,
+        )
+        conn.commit()
+    return get_memory(memory_id)
+
+
+def delete_memory(memory_id: int):
+    """Физическое удаление (для крайних случаев; основной способ — status=inactive)."""
+    with _connect() as conn:
+        _execute(conn, f"DELETE FROM long_term_memory WHERE id={_P}", (memory_id,))
+        conn.commit()
+
+
+def get_memory_links() -> list[dict]:
+    """Пары wiki-связей по всем active-заметкам: парсит [[...]] из content,
+    резолвит target по точному title. target_id=None, если заметка не найдена."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            "SELECT id, title, content FROM long_term_memory WHERE status='active'",
+        )
+        notes = _fetchall(cur)
+    title_to_id = {n["title"]: n["id"] for n in notes}
+    links: list[dict] = []
+    for n in notes:
+        for raw in _WIKILINK_RE.findall(n["content"] or ""):
+            target_title = raw.split("|")[0].strip()  # [[Заголовок|алиас]] → Заголовок
+            if not target_title:
+                continue
+            links.append({
+                "source_id": n["id"],
+                "source_title": n["title"],
+                "target_title": target_title,
+                "target_id": title_to_id.get(target_title),
+            })
+    return links
+
+
+# ── Буфер задач (tasks) ──
+
+_TASK_FIELDS = {"title", "context", "outcome", "status"}
+
+
+def list_tasks(status: str | None = None) -> list[dict]:
+    """Все задачи или фильтр по status. Сортировка: свежие сверху."""
+    with _connect() as conn:
+        if status:
+            cur = _execute(
+                conn,
+                f"SELECT * FROM tasks WHERE status={_P} ORDER BY updated_at DESC",
+                (status,),
+            )
+        else:
+            cur = _execute(conn, "SELECT * FROM tasks ORDER BY updated_at DESC")
+        return _fetchall(cur)
+
+
+def get_task(task_id: int) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT * FROM tasks WHERE id={_P}", (task_id,))
+        return _fetchone(cur)
+
+
+def create_task(title: str, context: str = "") -> dict:
+    now = time.time()
+    with _connect() as conn:
+        new_id = _insert_returning_id(
+            conn,
+            f"INSERT INTO tasks (title, status, context, outcome, created_at, updated_at) "
+            f"VALUES ({_P},'active',{_P},'',{_P},{_P})",
+            (title, context, now, now),
+        )
+        conn.commit()
+        cur = _execute(conn, f"SELECT * FROM tasks WHERE id={_P}", (new_id,))
+        return _fetchone(cur)
+
+
+def update_task(task_id: int, **fields) -> dict | None:
+    """Whitelist {title, context, outcome, status}. Всегда обновляет updated_at.
+    closed_at: ставится при переходе в completed/archived, обнуляется при active.
+    Возвращает обновлённую задачу или None, если id не найден."""
+    sets = []
+    vals = []
+    for k, v in fields.items():
+        if k not in _TASK_FIELDS:
+            continue
+        sets.append(f"{k}={_P}")
+        vals.append(v)
+    if "status" in fields:
+        if fields["status"] in ("completed", "archived"):
+            sets.append(f"closed_at={_P}")
+            vals.append(time.time())
+        elif fields["status"] == "active":
+            sets.append("closed_at=NULL")
+    if not sets:
+        return get_task(task_id)
+    sets.append(f"updated_at={_P}")
+    vals.append(time.time())
+    vals.append(task_id)
+    with _connect() as conn:
+        _execute(conn, f"UPDATE tasks SET {', '.join(sets)} WHERE id={_P}", vals)
+        conn.commit()
+    return get_task(task_id)
