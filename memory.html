@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/auth-gate.js"></script>
+  <title>CoS — Память</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .memory-page { height: 100vh; overflow: hidden; }
+    .mem-body { height: 100vh; }
+
+    /* ── Сайдбар ── */
+    .mem-nav { flex: 1; overflow-y: auto; padding: 6px; }
+    .mem-section-title { font-family: var(--f-mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); padding: 10px 10px 4px; }
+    .mem-folder { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; font-family: var(--f-mono); font-size: 11px; color: var(--ink-1); border-left: 2px solid transparent; transition: background .1s, color .1s, border-color .1s; }
+    .mem-folder:hover { background: rgba(107, 92, 255, .06); }
+    .mem-folder.active { background: linear-gradient(90deg, rgba(0, 240, 255, .10), transparent 80%); border-left-color: var(--cyan); color: var(--cyan); }
+    .mem-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 6px currentColor; }
+    .mem-folder-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem-folder-count { color: var(--ink-2); font-size: 10px; }
+    .mem-add-folder { margin: 4px 10px 2px; padding: 5px 8px; align-self: flex-start; font-family: var(--f-mono); font-size: 10px; letter-spacing: .06em; color: var(--ink-2); text-transform: uppercase; transition: color .15s; }
+    .mem-add-folder:hover { color: var(--cyan); }
+    .mem-task-list { display: none; flex-direction: column; }
+    .mem-task-list.open { display: flex; }
+    .mem-task-item { padding: 6px 10px 6px 28px; cursor: pointer; font-family: var(--f-mono); font-size: 11px; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem-task-item:hover { background: rgba(0, 240, 255, .06); color: var(--cyan); }
+    .mem-tools { border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+    #mem-search { margin: 8px; width: auto; }
+    #mem-new { margin: 0 8px 8px; }
+
+    /* ── Канвас ── */
+    .main { position: relative; }
+    #mem-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+    #mem-canvas.grabbing { cursor: grabbing; }
+    .mem-edge { stroke: var(--line-2); stroke-width: 1; opacity: .5; }
+    .mem-edge.dim { opacity: .08; }
+    .mem-node { cursor: pointer; }
+    .mem-node circle { filter: drop-shadow(0 0 3px currentColor); transition: r .1s; }
+    .mem-node:hover circle { r: 14; }
+    .mem-label { font-family: var(--f-mono); font-size: 13px; fill: var(--ink-1); pointer-events: none; paint-order: stroke; stroke: rgba(5, 6, 20, .85); stroke-width: 3px; }
+    .mem-node:hover .mem-label { fill: var(--ink-0); font-weight: 700; }
+    .mem-node.dim { opacity: .15; }
+    .mem-node.hit circle { stroke: var(--cyan); stroke-width: 3; }
+    .mem-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-family: var(--f-mono); font-size: 13px; pointer-events: none; }
+    .mem-empty[hidden] { display: none; }
+
+    /* ── Мобильный гамбургер (сайдбар-drawer на узких экранах) ── */
+    .mem-burger { display: none; }
+    @media (max-width: 640px) {
+      .mem-burger { display: flex; position: fixed; top: 10px; left: 10px; z-index: 201; width: 38px; height: 38px; align-items: center; justify-content: center; background: rgba(15, 16, 48, .92); border: 1px solid var(--line-2); color: var(--cyan); clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); }
+      .mem-burger:hover { border-color: var(--cyan); box-shadow: 0 0 14px rgba(0, 240, 255, .2); }
+    }
+
+    /* ── Досье ── */
+    .dossier-overlay { display: none; position: fixed; inset: 0; background: rgba(5, 6, 20, .6); z-index: 199; backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+    .dossier-overlay.open { display: block; }
+    .dossier { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 92vw; z-index: 200; background: linear-gradient(180deg, rgba(15, 16, 48, .97), rgba(10, 10, 31, .98)); border-left: 1px solid var(--line-2); transform: translateX(100%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); display: flex; flex-direction: column; box-shadow: -8px 0 32px rgba(0, 0, 0, .5); }
+    .dossier.open { transform: translateX(0); }
+    .dossier-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .dossier-head .t-hud { color: var(--cyan); }
+    .dossier-body { flex: 1; overflow-y: auto; padding: 16px; }
+    .dossier-field { margin-bottom: 14px; }
+    .dossier-field label { display: block; font-family: var(--f-mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2); margin-bottom: 5px; }
+    .dossier-field input, .dossier-field select, .dossier-field textarea { width: 100%; background: var(--bg-1); border: 1px solid var(--line); color: var(--ink-0); font-family: var(--f-mono); font-size: 12.5px; padding: 8px 10px; transition: border-color .2s; }
+    .dossier-field input:focus, .dossier-field textarea:focus, .dossier-field select:focus { border-color: var(--cyan); outline: 0; }
+    .dossier-field textarea { resize: vertical; min-height: 120px; line-height: 1.5; font-family: var(--f-display); font-size: 13.5px; }
+    .dossier-field select option { background: var(--bg-2); color: var(--ink-0); }
+    .mem-preview { background: rgba(5, 6, 20, .6); border: 1px solid var(--line); padding: 10px; min-height: 40px; font-family: var(--f-display); font-size: 13px; line-height: 1.6; color: var(--ink-1); white-space: pre-wrap; word-break: break-word; }
+    .mem-link { color: var(--cyan); cursor: pointer; text-shadow: 0 0 6px rgba(0, 240, 255, .4); }
+    .mem-link:hover { text-decoration: underline; }
+    .mem-link.missing { color: var(--magenta); cursor: default; text-shadow: none; opacity: .7; }
+    .dossier-dates { font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-2); line-height: 1.7; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 6px; }
+    .dossier-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .dossier-actions .btn { flex: 1; justify-content: center; }
+    .btn-danger { border-color: var(--magenta-dim); color: var(--magenta); }
+    .btn-danger:hover { background: rgba(255, 46, 99, .1); border-color: var(--magenta); color: var(--magenta); box-shadow: 0 0 18px rgba(255, 46, 99, .2); }
+    .dossier-close { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-family: var(--f-mono); font-size: 16px; }
+    .dossier-close:hover { color: var(--magenta); }
+  </style>
+</head>
+<body class="memory-page">
+  <div class="crt-overlay"></div>
+  <div class="vignette"></div>
+
+  <button id="mem-burger" class="mem-burger" title="Меню">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  </button>
+  <div id="sidebar-backdrop" class="dossier-overlay"></div>
+
+  <div class="app-body mem-body">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="logo">M</div>
+        <div class="brand-text">ПАМЯТЬ</div>
+      </div>
+      <div class="mem-nav">
+        <div class="mem-section-title">Папки</div>
+        <div id="mem-folders"></div>
+        <button id="mem-new-folder" class="mem-add-folder">+ Новая папка</button>
+        <div class="divider" style="margin: 10px 6px"></div>
+        <div class="mem-section-title">Задачи</div>
+        <div id="mem-tasks"></div>
+      </div>
+      <div class="mem-tools">
+        <input id="mem-search" class="settings-input" type="text" placeholder="Поиск…" autocomplete="off" />
+        <button id="mem-new" class="new-chat-btn">+ Новая заметка</button>
+      </div>
+      <div class="sidebar-settings">
+        <a href="/" class="sidebar-settings-link">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
+          </svg>
+          Текстовый чат
+        </a>
+      </div>
+    </aside>
+
+    <main class="main">
+      <svg id="mem-canvas" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800">
+        <g id="mem-edges"></g>
+        <g id="mem-nodes"></g>
+      </svg>
+      <div id="mem-empty" class="mem-empty" hidden>Пока нет заметок. Нажми «+ Новая заметка».</div>
+    </main>
+  </div>
+
+  <div id="dossier-overlay" class="dossier-overlay"></div>
+  <aside id="dossier" class="dossier">
+    <div class="dossier-head">
+      <span id="dossier-label" class="t-hud">Заметка</span>
+      <button id="dossier-close" class="dossier-close" title="Закрыть">✕</button>
+    </div>
+    <div id="dossier-body" class="dossier-body"></div>
+  </aside>
+
+  <script>
+    "use strict";
+
+    // ── Авторизованный fetch: auth-gate.js глобально патчит window.fetch и сам
+    //    добавляет Authorization: Bearer. Здесь нужен только JSON-обёртка. ──
+    const API = "";
+    async function api(method, path, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      return res.json();
+    }
+
+    // ── Цвет папки: автоген из хеша имени; без папки (null) — серый ──
+    const NO_FOLDER_COLOR = "#6e74a8";
+    function folderColor(name) {
+      if (!name) return NO_FOLDER_COLOR;
+      let hash = 0;
+      for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+      const h = Math.abs(hash) % 360;
+      return `hsl(${h}, 70%, 60%)`;
+    }
+
+    // ── Поле и параметры layout ──
+    const W = 1200, H = 800, NODE_R = 10, K_CAT = 0.05;
+
+    // ── Состояние ──
+    let notes = [], links = [], tasks = [], folders = [];
+    let pos = {};                              // id -> {x, y}
+    let vb = { x: 0, y: 0, w: W, h: H };       // viewBox
+    let activeFolder;                          // undefined=нет фильтра, null="Без папки", строка=папка
+    let searchQuery = "";
+    let currentNote = null, currentTask = null;
+    let moved = 0, tweenRAF = null;
+    const expanded = new Set();
+    const localFolders = new Set();            // папки, созданные кнопкой, ещё без заметок
+
+    // ── DOM ──
+    const svg        = document.getElementById("mem-canvas");
+    const edgesG     = document.getElementById("mem-edges");
+    const nodesG     = document.getElementById("mem-nodes");
+    const foldersEl  = document.getElementById("mem-folders");
+    const tasksEl    = document.getElementById("mem-tasks");
+    const searchEl   = document.getElementById("mem-search");
+    const emptyEl    = document.getElementById("mem-empty");
+    const dossier    = document.getElementById("dossier");
+    const dossierOv  = document.getElementById("dossier-overlay");
+    const dossierLbl = document.getElementById("dossier-label");
+    const dossierBody = document.getElementById("dossier-body");
+
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const byId = (id) => document.getElementById(id);
+    const noteById = (id) => notes.find((n) => String(n.id) === String(id));
+    function el(tag, attrs) {
+      const e = document.createElementNS(SVGNS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    }
+    function escapeHtml(s) {
+      return (s == null ? "" : String(s)).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    const escapeAttr = (s) => escapeHtml(s).replace(/"/g, "&quot;");
+    function fmt(sec) {
+      if (!sec) return "—";
+      return new Date(sec * 1000).toLocaleString("ru-RU");
+    }
+
+    // ── Рёбра по [[wiki-ссылкам]]: target_id != null, оба конца активны, без дублей и петель ──
+    function edgePairs() {
+      const ids = new Set(notes.map((n) => String(n.id)));
+      const seen = new Set(), out = [];
+      links.forEach((l) => {
+        if (l.target_id == null) return;
+        const a = String(l.source_id), b = String(l.target_id);
+        if (a === b || !ids.has(a) || !ids.has(b)) return;
+        const key = a < b ? a + "-" + b : b + "-" + a;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push([a, b]);
+      });
+      return out;
+    }
+
+    // ── Force-layout (Fruchterman–Reingold + притяжение по категории) ──
+    function relax(iters) {
+      const n = notes.length;
+      if (n === 0) return;
+      const k = 0.9 * Math.sqrt((W * H) / n);
+      let temp = W * 0.10;
+      const edges = edgePairs();
+      for (let it = 0; it < iters; it++) {
+        const disp = {};
+        notes.forEach((nd) => (disp[nd.id] = { x: 0, y: 0 }));
+
+        // отталкивание всех пар: f = k^2 / d
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const a = notes[i].id, b = notes[j].id;
+            let dx = pos[a].x - pos[b].x, dy = pos[a].y - pos[b].y;
+            let d = Math.hypot(dx, dy) || 0.01;
+            const f = (k * k) / d, ux = dx / d, uy = dy / d;
+            disp[a].x += ux * f; disp[a].y += uy * f;
+            disp[b].x -= ux * f; disp[b].y -= uy * f;
+          }
+        }
+        // притяжение по рёбрам: f = d^2 / k
+        for (const [a, b] of edges) {
+          if (!pos[a] || !pos[b]) continue;
+          let dx = pos[a].x - pos[b].x, dy = pos[a].y - pos[b].y;
+          let d = Math.hypot(dx, dy) || 0.01;
+          const f = (d * d) / k, ux = dx / d, uy = dy / d;
+          disp[a].x -= ux * f; disp[a].y -= uy * f;
+          disp[b].x += ux * f; disp[b].y += uy * f;
+        }
+        // притяжение к центроиду своей папки (null-папка группируется отдельно)
+        const cent = {}, cnt = {};
+        notes.forEach((nd) => {
+          const c = nd.folder || "";
+          if (!cent[c]) { cent[c] = { x: 0, y: 0 }; cnt[c] = 0; }
+          cent[c].x += pos[nd.id].x; cent[c].y += pos[nd.id].y; cnt[c]++;
+        });
+        for (const c in cent) { cent[c].x /= cnt[c]; cent[c].y /= cnt[c]; }
+        notes.forEach((nd) => {
+          const c = nd.folder || "";
+          disp[nd.id].x += (cent[c].x - pos[nd.id].x) * K_CAT;
+          disp[nd.id].y += (cent[c].y - pos[nd.id].y) * K_CAT;
+        });
+        // сдвиг с ограничением шага (остывание)
+        notes.forEach((nd) => {
+          const dp = disp[nd.id], dl = Math.hypot(dp.x, dp.y) || 0.01;
+          const s = Math.min(dl, temp);
+          pos[nd.id].x += (dp.x / dl) * s;
+          pos[nd.id].y += (dp.y / dl) * s;
+        });
+        temp *= 0.95;
+      }
+    }
+
+    function startPos(nd) {
+      const same = notes.filter((n) => (n.folder || null) === (nd.folder || null) && pos[n.id]);
+      if (same.length) {
+        const cx = same.reduce((s, n) => s + pos[n.id].x, 0) / same.length;
+        const cy = same.reduce((s, n) => s + pos[n.id].y, 0) / same.length;
+        return { x: cx + (Math.random() - 0.5) * 80, y: cy + (Math.random() - 0.5) * 80 };
+      }
+      return { x: W / 2 + (Math.random() - 0.5) * 120, y: H / 2 + (Math.random() - 0.5) * 120 };
+    }
+
+    // ── viewBox / камера ──
+    function setViewBox() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
+    function tweenTo(target, ms) {
+      if (tweenRAF) cancelAnimationFrame(tweenRAF);
+      const start = { ...vb }, t0 = performance.now();
+      function step(t) {
+        let p = Math.min(1, (t - t0) / ms);
+        const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; // easeInOutQuad
+        vb.x = start.x + (target.x - start.x) * e;
+        vb.y = start.y + (target.y - start.y) * e;
+        vb.w = start.w + (target.w - start.w) * e;
+        vb.h = start.h + (target.h - start.h) * e;
+        setViewBox();
+        if (p < 1) tweenRAF = requestAnimationFrame(step); else tweenRAF = null;
+      }
+      tweenRAF = requestAnimationFrame(step);
+    }
+    function fitTo(points, tween) {
+      if (!points.length) { vb = { x: 0, y: 0, w: W, h: H }; setViewBox(); return; }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      points.forEach((p) => {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      });
+      const pad = 90;
+      const w = Math.max(maxX - minX + pad * 2, 240);
+      const h = Math.max(maxY - minY + pad * 2, 240);
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      const target = { x: cx - w / 2, y: cy - h / 2, w, h };
+      if (tween) tweenTo(target, 320); else { vb = target; setViewBox(); }
+    }
+    const fitAll = (tween) => fitTo(notes.map((n) => pos[n.id]).filter(Boolean), tween);
+
+    // ── Фокус по категории / поиск ──
+    const matches = (nd) => ((nd.title || "") + " " + (nd.content || "")).toLowerCase().includes(searchQuery);
+    // val: строка (папка) или null ("Без папки"). Повторный клик снимает фильтр.
+    function focusFolder(val) {
+      activeFolder = activeFolder === val ? undefined : val;
+      renderSidebar();
+      render();
+      if (activeFolder !== undefined) {
+        const ps = notes.filter((n) => (n.folder || null) === activeFolder).map((n) => pos[n.id]).filter(Boolean);
+        if (ps.length) fitTo(ps, true);
+      } else {
+        fitAll(true);
+      }
+      closeSidebar();
+    }
+
+    // ── Рендер канваса ──
+    function render() {
+      edgesG.textContent = "";
+      nodesG.textContent = "";
+      const isDim = (nd) => (activeFolder !== undefined && (nd.folder || null) !== activeFolder) || (searchQuery && !matches(nd));
+      const isHit = (nd) => searchQuery && matches(nd);
+
+      edgePairs().forEach(([a, b]) => {
+        if (!pos[a] || !pos[b]) return;
+        const na = noteById(a), nb = noteById(b);
+        const dim = (na && isDim(na)) || (nb && isDim(nb));
+        edgesG.appendChild(el("line", {
+          x1: pos[a].x, y1: pos[a].y, x2: pos[b].x, y2: pos[b].y,
+          class: "mem-edge" + (dim ? " dim" : ""), "vector-effect": "non-scaling-stroke",
+        }));
+      });
+
+      notes.forEach((nd) => {
+        const p = pos[nd.id];
+        if (!p) return;
+        const color = folderColor(nd.folder);
+        const g = el("g", {
+          class: "mem-node" + (isDim(nd) ? " dim" : "") + (isHit(nd) ? " hit" : ""),
+          transform: "translate(" + p.x + "," + p.y + ")",
+        });
+        g.dataset.id = nd.id;
+        const c = el("circle", { r: NODE_R, fill: color, style: "color:" + color });
+        const t = el("text", { x: NODE_R + 5, y: 4, class: "mem-label" });
+        t.textContent = nd.title;
+        g.appendChild(c);
+        g.appendChild(t);
+        g.addEventListener("click", (ev) => { ev.stopPropagation(); if (moved < 4) openNote(nd.id); });
+        nodesG.appendChild(g);
+      });
+    }
+
+    function updateEmpty() { emptyEl.hidden = notes.length > 0; }
+
+    // ── Рендер сайдбара ──
+    function renderSidebar() {
+      // счётчики: по папкам + «без папки»
+      const fc = {};
+      let noFolderCount = 0;
+      notes.forEach((n) => { if (n.folder) fc[n.folder] = (fc[n.folder] || 0) + 1; else noFolderCount++; });
+      // полный список: папки из API/заметок + локально созданные кнопкой
+      const all = new Set([...folders, ...localFolders, ...Object.keys(fc)]);
+      const sorted = [...all].sort((a, b) => a.localeCompare(b, "ru"));
+
+      foldersEl.textContent = "";
+      sorted.forEach((name) => {
+        const color = folderColor(name);
+        const d = document.createElement("div");
+        d.className = "mem-folder" + (activeFolder === name ? " active" : "");
+        d.innerHTML =
+          '<span class="mem-dot" style="background:' + color + ';color:' + color + '"></span>' +
+          '<span class="mem-folder-label">' + escapeHtml(name) + "</span>" +
+          '<span class="mem-folder-count">' + (fc[name] || 0) + "</span>";
+        d.addEventListener("click", () => focusFolder(name));
+        foldersEl.appendChild(d);
+      });
+      // «Без папки» (folder = null)
+      const root = document.createElement("div");
+      root.className = "mem-folder" + (activeFolder === null ? " active" : "");
+      root.innerHTML =
+        '<span class="mem-dot" style="background:' + NO_FOLDER_COLOR + ';color:' + NO_FOLDER_COLOR + '"></span>' +
+        '<span class="mem-folder-label" style="color:var(--ink-2)">Без папки</span>' +
+        '<span class="mem-folder-count">' + noFolderCount + "</span>";
+      root.addEventListener("click", () => focusFolder(null));
+      foldersEl.appendChild(root);
+
+      tasksEl.textContent = "";
+      [["active", "Tasks — active"], ["completed", "Tasks — completed"]].forEach(([st, label]) => {
+        const list = tasks.filter((t) => t.status === st);
+        const f = document.createElement("div");
+        f.className = "mem-folder";
+        f.innerHTML =
+          '<span class="mem-folder-label" style="margin-left:2px">' + label + "</span>" +
+          '<span class="mem-folder-count">' + list.length + "</span>";
+        f.addEventListener("click", () => {
+          if (expanded.has(st)) expanded.delete(st); else expanded.add(st);
+          renderSidebar();
+        });
+        tasksEl.appendChild(f);
+
+        const ul = document.createElement("div");
+        ul.className = "mem-task-list" + (expanded.has(st) ? " open" : "");
+        list.forEach((t) => {
+          const it = document.createElement("div");
+          it.className = "mem-task-item";
+          it.textContent = t.title;
+          it.title = t.title;
+          it.addEventListener("click", () => openTask(t));
+          ul.appendChild(it);
+        });
+        tasksEl.appendChild(ul);
+      });
+    }
+
+    // ── Загрузка / обновление ──
+    async function fetchData() {
+      const [m, l, t, f] = await Promise.all([
+        api("GET", "/api/memory"),
+        api("GET", "/api/memory/links"),
+        api("GET", "/api/tasks"),
+        api("GET", "/api/memory/folders"),
+      ]);
+      notes = Array.isArray(m) ? m : [];
+      links = Array.isArray(l) ? l : [];
+      tasks = Array.isArray(t) ? t : [];
+      folders = Array.isArray(f) ? f : [];
+    }
+    // mode: 'full' (рандом + 150 итераций), 'relax' (40 итераций от текущих),
+    //       'none' (без пересчёта позиций)
+    async function reload(mode) {
+      await fetchData();
+      Object.keys(pos).forEach((id) => { if (!noteById(id)) delete pos[id]; });
+      if (mode === "full") pos = {};
+      notes.forEach((nd) => {
+        if (!pos[nd.id]) pos[nd.id] = mode === "full"
+          ? { x: Math.random() * W, y: Math.random() * H }
+          : startPos(nd);
+      });
+      if (mode === "full") relax(150);
+      else if (mode === "relax") relax(40);
+      render();
+      renderSidebar();
+      updateEmpty();
+    }
+
+    // ── Досье ──
+    function openDossier() { dossierOv.classList.add("open"); dossier.classList.add("open"); }
+    function closeDossier() { dossierOv.classList.remove("open"); dossier.classList.remove("open"); }
+
+    function renderPreview(text) {
+      return escapeHtml(text)
+        .replace(/\[\[([^\]]+)\]\]/g, (m, inner) => {
+          const title = inner.split("|")[0].trim();
+          const found = notes.find((n) => n.title === title);
+          const cls = found ? "mem-link" : "mem-link missing";
+          const attr = found ? ' data-id="' + found.id + '"' : "";
+          return '<span class="' + cls + '"' + attr + ">[[" + escapeHtml(inner) + "]]</span>";
+        })
+        .replace(/\n/g, "<br>");
+    }
+
+    function openNote(id) {
+      const note = id == null ? null : noteById(id);
+      currentNote = note;
+      currentTask = null;
+      dossierLbl.textContent = note ? "Заметка" : "Новая заметка";
+      const folderVal = note && note.folder ? note.folder : "";
+      const known = [...new Set([...folders, ...localFolders])].sort((a, b) => a.localeCompare(b, "ru"));
+      const dlOpts = known.map((f) => '<option value="' + escapeAttr(f) + '"></option>').join("");
+      dossierBody.innerHTML =
+        '<div class="dossier-field"><label>Заголовок</label><input id="d-title" type="text" value="' + (note ? escapeAttr(note.title) : "") + '"></div>' +
+        '<div class="dossier-field"><label>Папка</label><input id="d-folder" type="text" list="folder-options" placeholder="(без папки)" value="' + escapeAttr(folderVal) + '"><datalist id="folder-options">' + dlOpts + "</datalist></div>" +
+        '<div class="dossier-field"><label>Содержимое (markdown, [[ссылки]])</label><textarea id="d-content">' + (note ? escapeHtml(note.content) : "") + "</textarea></div>" +
+        '<div class="dossier-field"><label>Предпросмотр</label><div id="d-preview" class="mem-preview"></div></div>' +
+        '<div class="dossier-actions"><button id="d-save" class="btn btn-primary">' + (note ? "Сохранить" : "Создать") + "</button>" +
+        (note ? '<button id="d-del" class="btn btn-danger">Удалить</button>' : "") + "</div>" +
+        (note ? '<div class="dossier-dates">Создано: ' + fmt(note.created_at) + "<br>Обновлено: " + fmt(note.updated_at) + "</div>" : "");
+
+      const contentEl = byId("d-content"), prev = byId("d-preview");
+      const upd = () => { prev.innerHTML = renderPreview(contentEl.value); };
+      contentEl.addEventListener("input", upd);
+      upd();
+      prev.addEventListener("click", (ev) => {
+        const a = ev.target.closest(".mem-link");
+        if (a && a.dataset.id) openNote(Number(a.dataset.id));
+      });
+      byId("d-save").addEventListener("click", saveNote);
+      if (note) byId("d-del").addEventListener("click", deleteNote);
+      openDossier();
+    }
+
+    function openTask(t) {
+      currentTask = t;
+      currentNote = null;
+      dossierLbl.textContent = "Задача";
+      const sopts = ["active", "completed", "archived"]
+        .map((s) => '<option value="' + s + '"' + (s === t.status ? " selected" : "") + ">" + s + "</option>").join("");
+      dossierBody.innerHTML =
+        '<div class="dossier-field"><label>Заголовок</label><input id="t-title" type="text" value="' + escapeAttr(t.title) + '"></div>' +
+        '<div class="dossier-field"><label>Статус</label><select id="t-status">' + sopts + "</select></div>" +
+        '<div class="dossier-field"><label>Контекст</label><textarea id="t-context">' + escapeHtml(t.context) + "</textarea></div>" +
+        '<div class="dossier-field" id="t-outcome-wrap"><label>Итог</label><textarea id="t-outcome">' + escapeHtml(t.outcome) + "</textarea></div>" +
+        '<div class="dossier-actions"><button id="t-save" class="btn btn-primary">Сохранить</button></div>' +
+        '<div class="dossier-dates">Создано: ' + fmt(t.created_at) + "<br>Обновлено: " + fmt(t.updated_at) + "<br>Закрыто: " + fmt(t.closed_at) + "</div>";
+
+      const statusEl = byId("t-status"), wrap = byId("t-outcome-wrap");
+      const toggle = () => { wrap.style.display = statusEl.value === "active" ? "none" : "block"; };
+      statusEl.addEventListener("change", toggle);
+      toggle();
+      byId("t-save").addEventListener("click", saveTask);
+      closeSidebar();
+      openDossier();
+    }
+
+    async function saveNote() {
+      const title = byId("d-title").value.trim();
+      if (!title) { alert("Заголовок обязателен"); return; }
+      const payload = { title, folder: byId("d-folder").value, content: byId("d-content").value };
+      const editing = !!currentNote;
+      const r = editing
+        ? await api("PATCH", "/api/memory/" + currentNote.id, payload)
+        : await api("POST", "/api/memory", payload);
+      if (r && r.error) {
+        alert(r.error === "title_exists" ? "Заметка с таким заголовком уже существует" : "Ошибка: " + r.error);
+        return;
+      }
+      closeDossier();
+      await reload(editing ? "none" : "relax");
+    }
+
+    async function deleteNote() {
+      if (!currentNote) return;
+      if (!confirm("Удалить заметку «" + currentNote.title + "»? (мягкое удаление)")) return;
+      await api("PATCH", "/api/memory/" + currentNote.id, { status: "inactive" });
+      closeDossier();
+      await reload("none");
+    }
+
+    async function saveTask() {
+      const title = byId("t-title").value.trim();
+      if (!title) { alert("Заголовок обязателен"); return; }
+      const payload = {
+        title, status: byId("t-status").value,
+        context: byId("t-context").value, outcome: byId("t-outcome").value,
+      };
+      const r = await api("PATCH", "/api/tasks/" + currentTask.id, payload);
+      if (r && r.error) { alert("Ошибка: " + r.error); return; }
+      closeDossier();
+      tasks = await api("GET", "/api/tasks");
+      if (!Array.isArray(tasks)) tasks = [];
+      renderSidebar();
+    }
+
+    // ── Пан / зум ──
+    let panning = false, panStart = null, vbStart = null;
+    svg.addEventListener("mousedown", (e) => {
+      panning = true; moved = 0;
+      panStart = { x: e.clientX, y: e.clientY };
+      vbStart = { ...vb };
+      svg.classList.add("grabbing");
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!panning) return;
+      const dx = e.clientX - panStart.x, dy = e.clientY - panStart.y;
+      moved = Math.max(moved, Math.hypot(dx, dy));
+      const rect = svg.getBoundingClientRect();
+      vb.x = vbStart.x - (dx * vb.w) / rect.width;
+      vb.y = vbStart.y - (dy * vb.h) / rect.height;
+      setViewBox();
+    });
+    window.addEventListener("mouseup", () => { panning = false; svg.classList.remove("grabbing"); });
+    svg.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const fx = (e.clientX - rect.left) / rect.width, fy = (e.clientY - rect.top) / rect.height;
+      const wx = vb.x + fx * vb.w, wy = vb.y + fy * vb.h;
+      const ratio = vb.h / vb.w;
+      let nw = vb.w * (e.deltaY > 0 ? 1.1 : 1 / 1.1);
+      nw = Math.max(120, Math.min(8000, nw));
+      vb.w = nw; vb.h = nw * ratio;
+      vb.x = wx - fx * vb.w; vb.y = wy - fy * vb.h;
+      setViewBox();
+    }, { passive: false });
+
+    // ── Прочие обработчики ──
+    searchEl.addEventListener("input", () => { searchQuery = searchEl.value.trim().toLowerCase(); render(); });
+    byId("mem-new").addEventListener("click", () => { closeSidebar(); openNote(null); });
+    byId("mem-new-folder").addEventListener("click", () => {
+      const name = (prompt("Имя новой папки:") || "").trim();
+      if (!name) return;
+      localFolders.add(name);   // в БД появится, когда сохранишь заметку в эту папку
+      renderSidebar();
+    });
+    byId("dossier-close").addEventListener("click", closeDossier);
+    dossierOv.addEventListener("click", closeDossier);
+    window.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeDossier(); closeSidebar(); } });
+
+    // Мобильный сайдбар-drawer
+    const sidebar = document.querySelector(".sidebar");
+    const sidebarBackdrop = byId("sidebar-backdrop");
+    function closeSidebar() { sidebar.classList.remove("open"); sidebarBackdrop.classList.remove("open"); }
+    byId("mem-burger").addEventListener("click", () => {
+      const open = sidebar.classList.toggle("open");
+      sidebarBackdrop.classList.toggle("open", open);
+    });
+    sidebarBackdrop.addEventListener("click", closeSidebar);
+
+    // ── Старт ──
+    (async function init() {
+      try {
+        await reload("full");
+        fitAll(false);
+      } catch (err) {
+        console.error("memory init failed", err);
+      }
+    })();
+  </script>
+</body>
+</html>

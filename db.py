@@ -185,12 +185,11 @@ CREATE TABLE IF NOT EXISTS long_term_memory (
     id         SERIAL PRIMARY KEY,
     title      TEXT NOT NULL,
     content    TEXT NOT NULL DEFAULT '',
-    category   TEXT NOT NULL DEFAULT 'general',
+    folder     TEXT,
     status     TEXT NOT NULL DEFAULT 'active',
     created_at DOUBLE PRECISION NOT NULL,
     updated_at DOUBLE PRECISION NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_ltm_category ON long_term_memory(category);
 CREATE INDEX IF NOT EXISTS idx_ltm_status   ON long_term_memory(status);
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -281,12 +280,11 @@ CREATE TABLE IF NOT EXISTS long_term_memory (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     title      TEXT NOT NULL,
     content    TEXT NOT NULL DEFAULT '',
-    category   TEXT NOT NULL DEFAULT 'general',
+    folder     TEXT,
     status     TEXT NOT NULL DEFAULT 'active',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_ltm_category ON long_term_memory(category);
 CREATE INDEX IF NOT EXISTS idx_ltm_status   ON long_term_memory(status);
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -401,6 +399,18 @@ def _migrate(conn):
         _rebuild_chat_facts(conn)
         conn.commit()
 
+    # 8. long_term_memory: category → folder (свободные пользовательские папки, nullable)
+    if (_column_exists(conn, "long_term_memory", "category")
+            and not _column_exists(conn, "long_term_memory", "folder")):
+        _migrate_ltm_folder(conn)
+        conn.commit()
+    if _column_exists(conn, "long_term_memory", "folder"):
+        _execute(conn, "DROP INDEX IF EXISTS idx_ltm_category")
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_ltm_folder ON long_term_memory(folder)")
+        # rebuild на SQLite пересоздаёт таблицу без индексов — восстанавливаем status-индекс
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_ltm_status ON long_term_memory(status)")
+        conn.commit()
+
 
 def _rebuild_summaries(conn):
     real = "DOUBLE PRECISION" if _PG else "REAL"
@@ -456,6 +466,38 @@ def _rebuild_chat_facts(conn):
     )
     _execute(conn, "DROP TABLE chat_facts")
     _execute(conn, "ALTER TABLE chat_facts_new RENAME TO chat_facts")
+
+
+def _migrate_ltm_folder(conn):
+    """long_term_memory.category → folder (TEXT, nullable). Старые значения категорий
+    сохраняются как имена папок. На SQLite — rebuild (нельзя ALTER COLUMN, чтобы снять
+    NOT NULL/DEFAULT и сделать колонку nullable); на PostgreSQL — RENAME + DROP NOT NULL/DEFAULT.
+    """
+    if _PG:
+        _execute(conn, "ALTER TABLE long_term_memory RENAME COLUMN category TO folder")
+        _execute(conn, "ALTER TABLE long_term_memory ALTER COLUMN folder DROP NOT NULL")
+        _execute(conn, "ALTER TABLE long_term_memory ALTER COLUMN folder DROP DEFAULT")
+    else:
+        _execute(
+            conn,
+            "CREATE TABLE long_term_memory_new ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  title TEXT NOT NULL,"
+            "  content TEXT NOT NULL DEFAULT '',"
+            "  folder TEXT,"
+            "  status TEXT NOT NULL DEFAULT 'active',"
+            "  created_at REAL NOT NULL,"
+            "  updated_at REAL NOT NULL)",
+        )
+        _execute(
+            conn,
+            "INSERT INTO long_term_memory_new "
+            "(id, title, content, folder, status, created_at, updated_at) "
+            "SELECT id, title, content, category, status, created_at, updated_at "
+            "FROM long_term_memory",
+        )
+        _execute(conn, "DROP TABLE long_term_memory")
+        _execute(conn, "ALTER TABLE long_term_memory_new RENAME TO long_term_memory")
 
 
 def init_db():
@@ -1177,22 +1219,22 @@ def delete_chat_fact_by_id(fact_id: int):
 
 # ── Долговременная память (long_term_memory) ──
 
-_MEMORY_FIELDS = {"title", "content", "category", "status"}
+_MEMORY_FIELDS = {"title", "content", "folder", "status"}
 
 # Wiki-ссылка [[Заголовок]] или [[Заголовок|алиас]] в markdown-теле заметки.
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
-_MEMORY_COLS = "id, title, content, category, status, created_at, updated_at"
+_MEMORY_COLS = "id, title, content, folder, status, created_at, updated_at"
 
 
-def list_memory(category: str | None = None, q: str | None = None) -> list[dict]:
-    """Активные заметки. Опц. фильтр по category и полнотекстовый поиск q
+def list_memory(folder: str | None = None, q: str | None = None) -> list[dict]:
+    """Активные заметки. Опц. фильтр по folder и полнотекстовый поиск q
     (LOWER(title) LIKE OR LOWER(content) LIKE). Сортировка: свежие сверху."""
     where = ["status='active'"]
     params: list = []
-    if category:
-        where.append(f"category={_P}")
-        params.append(category)
+    if folder:
+        where.append(f"folder={_P}")
+        params.append(folder)
     if q:
         like = f"%{q.lower()}%"
         where.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
@@ -1216,9 +1258,9 @@ def get_memory(memory_id: int) -> dict | None:
         return _fetchone(cur)
 
 
-def create_memory(title: str, content: str = "", category: str = "general") -> dict | None:
+def create_memory(title: str, content: str = "", folder: str | None = None) -> dict | None:
     """Создаёт заметку. Если active-заметка с таким title уже есть → None (=409).
-    Проверка и вставка в одной транзакции (защита от гонки)."""
+    Проверка и вставка в одной транзакции (защита от гонки). folder=None → без папки."""
     now = time.time()
     with _connect() as conn:
         cur = _execute(
@@ -1231,9 +1273,9 @@ def create_memory(title: str, content: str = "", category: str = "general") -> d
         new_id = _insert_returning_id(
             conn,
             f"INSERT INTO long_term_memory "
-            f"(title, content, category, status, created_at, updated_at) "
+            f"(title, content, folder, status, created_at, updated_at) "
             f"VALUES ({_P},{_P},{_P},'active',{_P},{_P})",
-            (title, content, category, now, now),
+            (title, content, folder, now, now),
         )
         conn.commit()
         cur = _execute(
@@ -1245,7 +1287,7 @@ def create_memory(title: str, content: str = "", category: str = "general") -> d
 
 
 def update_memory(memory_id: int, **fields) -> dict | None:
-    """Whitelist {title, content, category, status}. Всегда обновляет updated_at.
+    """Whitelist {title, content, folder, status}. Всегда обновляет updated_at.
     Возвращает обновлённую запись или None, если id не найден."""
     sets = []
     vals = []
@@ -1299,6 +1341,18 @@ def get_memory_links() -> list[dict]:
                 "target_id": title_to_id.get(target_title),
             })
     return links
+
+
+def get_memory_folders() -> list[str]:
+    """Уникальные папки активных заметок (без NULL), по алфавиту. Папки не хранятся
+    отдельной таблицей — выводятся из DISTINCT folder."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            "SELECT DISTINCT folder FROM long_term_memory "
+            "WHERE status='active' AND folder IS NOT NULL ORDER BY folder",
+        )
+        return [r["folder"] for r in _fetchall(cur)]
 
 
 # ── Буфер задач (tasks) ──

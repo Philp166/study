@@ -63,7 +63,7 @@ AUTH_TTL = 60 * 60 * 6  # срок жизни токена — 6 часов (с�
 # через /api после ввода пароля) + статика для отрисовки оверлёя входа + health-check.
 # Всё остальное (/api/*, стримы) требует валидный Bearer-токен.
 PUBLIC_PATHS = {
-    "/", "/voice", "/settings",
+    "/", "/voice", "/settings", "/memory",
     "/login", "/healthz", "/favicon.ico",
     "/styles.css", "/agent.js", "/auth-gate.js",
 }
@@ -476,16 +476,23 @@ def api_delete_fact(chat_id: str, fact_id: int):
 
 
 # ── Долговременная память API ──
-# Тела запросов — простыми dict (как api_update_settings). Валидация enum'ов
-# и обязательных полей — здесь, в app-слое.
+# Тела запросов — простыми dict (как api_update_settings). Валидация обязательных
+# полей — здесь, в app-слое. Папки (folder) — свободная строка, без enum.
 
-MEMORY_CATEGORIES = {"person", "project", "tech", "decision", "preference", "general"}
 MEMORY_STATUSES = {"active", "inactive"}
 
 
+def _norm_folder(v):
+    """Пустая строка/пробелы → None (заметка без папки). Иначе обрезанная строка."""
+    if v is None:
+        return None
+    v = str(v).strip()
+    return v or None
+
+
 @app.get("/api/memory")
-def api_list_memory(category: str | None = None, q: str | None = None):
-    return db.list_memory(category=category, q=q)
+def api_list_memory(folder: str | None = None, q: str | None = None):
+    return db.list_memory(folder=folder, q=q)
 
 
 @app.post("/api/memory")
@@ -493,18 +500,16 @@ def api_create_memory(body: dict):
     title = (body.get("title") or "").strip()
     if not title:
         return JSONResponse(status_code=400, content={"error": "title_required"})
-    category = body.get("category") or "general"
-    if category not in MEMORY_CATEGORIES:
-        category = "general"
     content = body.get("content") or ""
-    row = db.create_memory(title=title, content=content, category=category)
+    folder = _norm_folder(body.get("folder"))
+    row = db.create_memory(title=title, content=content, folder=folder)
     if row is None:
         return JSONResponse(status_code=409, content={"error": "title_exists"})
     return row
 
 
-# ВАЖНО: /search и /links регистрируются ДО /{memory_id}, иначе FastAPI поймает
-# их как memory_id и упадёт на валидации int (422).
+# ВАЖНО: /search, /links, /folders регистрируются ДО /{memory_id}, иначе FastAPI
+# поймает их как memory_id и упадёт на валидации int (422).
 @app.get("/api/memory/search")
 def api_search_memory(q: str = ""):
     return db.list_memory(q=q)
@@ -513,6 +518,11 @@ def api_search_memory(q: str = ""):
 @app.get("/api/memory/links")
 def api_memory_links():
     return db.get_memory_links()
+
+
+@app.get("/api/memory/folders")
+def api_memory_folders():
+    return db.get_memory_folders()
 
 
 @app.get("/api/memory/{memory_id}")
@@ -533,10 +543,8 @@ def api_update_memory(memory_id: int, body: dict):
         clean["title"] = title
     if "content" in body:
         clean["content"] = body["content"] or ""
-    if "category" in body:
-        if body["category"] not in MEMORY_CATEGORIES:
-            return JSONResponse(status_code=400, content={"error": "bad_category"})
-        clean["category"] = body["category"]
+    if "folder" in body:
+        clean["folder"] = _norm_folder(body["folder"])
     if "status" in body:
         if body["status"] not in MEMORY_STATUSES:
             return JSONResponse(status_code=400, content={"error": "bad_status"})
@@ -754,6 +762,11 @@ def voice_page():
 @app.get("/settings")
 def settings_page():
     return FileResponse(BASE_DIR / "settings.html")
+
+
+@app.get("/memory")
+def memory_page():
+    return FileResponse(BASE_DIR / "memory.html")
 
 
 @app.post("/voice/chat/stream")
