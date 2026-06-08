@@ -871,6 +871,17 @@ def _stream_chat_response(chat_id: str, model: str,
 
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
+            # Логируем трейс на сервер (видно в логах Render) — иначе причина скрыта.
+            log.exception("chat stream failed chat=%s", chat_id)
+            # Не теряем уже сгенерированный ответ: если поток/инструменты упали ПОСЛЕ
+            # генерации текста, всё равно сохраняем сообщение ассистента (иначе оно
+            # пропадает при перезагрузке чата).
+            if full_text.strip():
+                try:
+                    db.add_message(chat_id, "assistant", full_text,
+                                   parent_message_id=user_message_id)
+                except Exception:
+                    log.exception("failed to persist assistant message after stream error")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1086,6 +1097,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
                 ):
                     loop.call_soon_threadsafe(text_queue.put_nowait, ("chunk", chunk))
             except Exception as e:
+                log.exception("voice stream failed chat=%s", req.chat_id)
                 loop.call_soon_threadsafe(text_queue.put_nowait, ("error", str(e)))
             loop.call_soon_threadsafe(text_queue.put_nowait, ("end", ""))
 
@@ -1102,6 +1114,13 @@ async def voice_chat_stream(req: VoiceChatRequest):
                 break
 
             if msg_type == "error":
+                # Не теряем уже сгенерированный голосовой ответ при ошибке потока.
+                if req.chat_id and full_text.strip():
+                    try:
+                        db.add_message(req.chat_id, "assistant", full_text,
+                                       parent_message_id=voice_user_id)
+                    except Exception:
+                        log.exception("voice: failed to persist assistant message after error")
                 yield f"data: {json.dumps({'type': 'error', 'message': data})}\n\n"
                 break
 
