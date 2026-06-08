@@ -143,7 +143,7 @@ def test_merge_only_active_notes(fresh_db):
 def test_build_suggestion_save_memory_full():
     sug = agent.build_suggestion(
         "save_memory", {"title": " Сервер ", "content": " prod-узел ", "folder": " Инфра "})
-    assert sug == {"task": None, "memory": {
+    assert sug == {"task": None, "project": None, "memory": {
         "action": "create", "title": "Сервер", "content": "prod-узел", "folder": "Инфра"}}
 
 
@@ -161,13 +161,13 @@ def test_build_suggestion_blank_folder_dropped():
 def test_build_suggestion_save_task():
     sug = agent.build_suggestion("save_task", {"title": "Диагностика", "context": "до пятницы"})
     assert sug == {"task": {"action": "create", "title": "Диагностика", "context": "до пятницы"},
-                   "memory": None}
+                   "memory": None, "project": None}
 
 
 def test_build_suggestion_close_task():
     sug = agent.build_suggestion("close_task", {"title": "Диагностика", "outcome": "готово"})
     assert sug == {"task": {"action": "close", "title": "Диагностика", "outcome": "готово"},
-                   "memory": None}
+                   "memory": None, "project": None}
 
 
 def test_build_suggestion_requires_title():
@@ -367,3 +367,94 @@ def test_links_backfill_from_existing_notes(tmp_path, monkeypatch):
     assert links[0]["source_title"] == "Алёна"
     assert links[0]["target_title"] == "Проект Икс"
     assert links[0]["target_id"] is not None    # бэкфилл + резолв связал target
+
+
+# ── Этап 2b: проекты — build_suggestion ──
+
+def test_build_suggestion_create_project():
+    sug = agent.build_suggestion("create_project", {"title": " Компьютер ", "description": " сборка "})
+    assert sug == {"task": None, "memory": None,
+                   "project": {"action": "create", "title": "Компьютер", "description": "сборка"}}
+
+
+def test_build_suggestion_project_field():
+    m = agent.build_suggestion("save_memory", {"title": "T", "content": "c", "project": " Офис "})
+    assert m["memory"]["project"] == "Офис"
+    t = agent.build_suggestion("save_task", {"title": "T", "project": "Офис"})
+    assert t["task"]["project"] == "Офис"
+    m2 = agent.build_suggestion("save_memory", {"title": "T", "content": "c", "project": "  "})
+    assert "project" not in m2["memory"]          # пустой project не добавляется
+
+
+# ── Этап 2b: _apply_suggestion проекты (закрытие бага A) ──
+
+def test_apply_create_project_slot(fresh_db):
+    saved = app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
+    assert saved["project"] is True and saved["project_status"] == "created"
+    assert db.get_project_by_title("компьютер")["title"] == "Компьютер"
+    saved2 = app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
+    assert saved2["project_status"] == "exists"   # повторно — не дубль
+
+
+def test_apply_bug_a_create_project_not_note(fresh_db):
+    """Acceptance бага A: «создай проект Компьютер» → строка в projects, НЕ заметка."""
+    app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
+    assert len(db.list_projects()) == 1
+    assert db.list_memory() == []                 # обычной заметки НЕ создано
+
+
+def test_apply_memory_with_project_resolves_or_creates(fresh_db):
+    saved = app._apply_suggestion(
+        None, {"action": "create", "title": "Сервер", "content": "prod", "project": "Инфра"}, None)
+    assert saved["memory"] is True
+    proj = db.get_project_by_title("Инфра")
+    assert proj is not None                        # проект создан автоматически
+    assert db.list_memory(q="Сервер")[0]["project_id"] == proj["id"]
+
+
+def test_apply_task_with_project(fresh_db):
+    p = db.create_project(title="Инфра")
+    app._apply_suggestion({"action": "create", "title": "Чинить", "project": "инфра"}, None, None)
+    assert db.find_active_task_by_title("Чинить")["project_id"] == p["id"]
+
+
+# ── Этап 2b: backfill + delete_project ──
+
+def test_backfill_folders_to_projects(fresh_db):
+    db.create_memory(title="A", content="x", folder="Офис")
+    db.create_memory(title="B", content="y", folder="Офис")
+    db.create_memory(title="C", content="z", folder=None)
+    res = db.backfill_folders_to_projects()
+    assert res == {"projects_created": 1, "notes_linked": 2}
+    proj = db.get_project_by_title("Офис")
+    linked = {n["title"] for n in db.list_memory() if n["project_id"] == proj["id"]}
+    assert linked == {"A", "B"}
+    assert db.backfill_folders_to_projects() == {"projects_created": 0, "notes_linked": 0}  # идемпотентно
+
+
+def test_delete_project_detaches_notes(fresh_db):
+    p = db.create_project(title="Офис")
+    n = db.create_memory(title="A", content="x")
+    db.update_memory(n["id"], project_id=p["id"])
+    assert db.get_memory(n["id"])["project_id"] == p["id"]
+    db.delete_project(p["id"])
+    assert db.get_memory(n["id"])["project_id"] is None   # FK ON DELETE SET NULL
+
+
+# ── Этап 2b: API проектов (прямые вызовы ручек) ──
+
+def test_api_projects_crud(fresh_db):
+    row = app.api_create_project({"title": "Офис", "description": "переезд"})
+    assert isinstance(row, dict) and row["title"] == "Офис"
+    dup = app.api_create_project({"title": "Офис"})
+    assert getattr(dup, "status_code", None) == 409
+    assert any(p["title"] == "Офис" for p in app.api_list_projects())
+    bad = app.api_create_project({"title": "  "})
+    assert getattr(bad, "status_code", None) == 400
+
+
+def test_create_project_normalized_dedup(fresh_db):
+    p = db.create_project(title="Инфра")
+    assert db.create_project(title="  инфра ") is None     # нормализованный дубль не создаём
+    assert app._resolve_or_create_project_id("ИНФРА") == p["id"]
+    assert len(db.list_projects()) == 1

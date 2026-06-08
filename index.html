@@ -757,7 +757,7 @@
               }
               if (data.type === "usage") updateTokenPanel(data);
               if (data.type === "memory_suggestion") {
-                if (data.task || data.memory) pendingSuggestion = { task: data.task || null, memory: data.memory || null };
+                if (data.task || data.memory || data.project) pendingSuggestion = { task: data.task || null, memory: data.memory || null, project: data.project || null };
               }
               if (data.type === "suggestion_applied") {
                 pendingSuggestion = null;
@@ -795,22 +795,29 @@
       const bodies = transcriptEl.querySelectorAll(".msg-wrap.bot .msg-body");
       const host = bodies[bodies.length - 1];
       if (!host) return;
-      const { task, memory } = pendingSuggestion;
+      const { task, memory, project } = pendingSuggestion;
       let html = '<div class="mem-suggestion-title">📝 Предлагаю сохранить:</div>';
+      if (project) {
+        html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">Проект</span>'
+          + _sugEsc(project.title || "")
+          + (project.description ? '<div class="mem-suggestion-body">' + _sugEsc(project.description) + '</div>' : '') + '</div>';
+      }
       if (task) {
         const verb = task.action === "close" ? "Закрыть задачу"
           : task.action === "update" ? "Обновить задачу" : "Задача";
+        const proj = task.project ? ' → проект: ' + _sugEsc(task.project) : '';
         const body = task.outcome || task.context || "";
         html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
-          + _sugEsc(task.title || ("#" + (task.id || "")))
+          + _sugEsc(task.title || ("#" + (task.id || ""))) + proj
           + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
       }
       if (memory) {
         const verb = memory.action === "update" ? "Обновить заметку" : "Память";
         const folder = memory.folder ? ' → папка: ' + _sugEsc(memory.folder) : '';
+        const proj = memory.project ? ' → проект: ' + _sugEsc(memory.project) : '';
         const body = memory.content || "";
         html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
-          + _sugEsc(memory.title || ("#" + (memory.id || ""))) + folder
+          + _sugEsc(memory.title || ("#" + (memory.id || ""))) + folder + proj
           + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
       }
       const box = document.createElement("div");

@@ -100,6 +100,10 @@
         <div class="brand-text">ПАМЯТЬ</div>
       </div>
       <div class="mem-nav">
+        <div class="mem-section-title">Проекты</div>
+        <div id="mem-projects"></div>
+        <button id="mem-backfill" class="mem-add-folder" title="Завести проект на каждую папку и привязать заметки">↪ Папки → проекты</button>
+        <div class="divider" style="margin: 10px 6px"></div>
         <div class="mem-section-title">Папки</div>
         <div id="mem-folders"></div>
         <button id="mem-new-folder" class="mem-add-folder">+ Новая папка</button>
@@ -166,10 +170,11 @@
     const W = 1200, H = 800, NODE_R = 10, K_CAT = 0.05;
 
     // ── Состояние ──
-    let notes = [], links = [], tasks = [], folders = [];
+    let notes = [], links = [], tasks = [], folders = [], projects = [];
     let pos = {};                              // id -> {x, y}
     let vb = { x: 0, y: 0, w: W, h: H };       // viewBox
     let activeFolder;                          // undefined=нет фильтра, null="Без папки", строка=папка
+    let activeProject;                         // undefined=нет фильтра, иначе id проекта
     let searchQuery = "";
     let currentNote = null, currentTask = null;
     let moved = 0, tweenRAF = null;
@@ -181,6 +186,7 @@
     const edgesG     = document.getElementById("mem-edges");
     const nodesG     = document.getElementById("mem-nodes");
     const foldersEl  = document.getElementById("mem-folders");
+    const projectsEl = document.getElementById("mem-projects");
     const tasksEl    = document.getElementById("mem-tasks");
     const searchEl   = document.getElementById("mem-search");
     const emptyEl    = document.getElementById("mem-empty");
@@ -324,6 +330,7 @@
     const matches = (nd) => ((nd.title || "") + " " + (nd.content || "")).toLowerCase().includes(searchQuery);
     // val: строка (папка) или null ("Без папки"). Повторный клик снимает фильтр.
     function focusFolder(val) {
+      activeProject = undefined;
       activeFolder = activeFolder === val ? undefined : val;
       renderSidebar();
       render();
@@ -336,11 +343,26 @@
       closeSidebar();
     }
 
+    // Фильтр по проекту (id). Повторный клик снимает фильтр.
+    function focusProject(id) {
+      activeFolder = undefined;
+      activeProject = activeProject === id ? undefined : id;
+      renderSidebar();
+      render();
+      if (activeProject !== undefined) {
+        const ps = notes.filter((n) => String(n.project_id) === String(activeProject)).map((n) => pos[n.id]).filter(Boolean);
+        if (ps.length) fitTo(ps, true);
+      } else {
+        fitAll(true);
+      }
+      closeSidebar();
+    }
+
     // ── Рендер канваса ──
     function render() {
       edgesG.textContent = "";
       nodesG.textContent = "";
-      const isDim = (nd) => (activeFolder !== undefined && (nd.folder || null) !== activeFolder) || (searchQuery && !matches(nd));
+      const isDim = (nd) => (activeFolder !== undefined && (nd.folder || null) !== activeFolder) || (activeProject !== undefined && String(nd.project_id) !== String(activeProject)) || (searchQuery && !matches(nd));
       const isHit = (nd) => searchQuery && matches(nd);
 
       edgePairs().forEach(([a, b]) => {
@@ -376,6 +398,28 @@
 
     // ── Рендер сайдбара ──
     function renderSidebar() {
+      // Проекты (счётчики заметок по project_id)
+      const pc = {};
+      notes.forEach((n) => { if (n.project_id != null) pc[n.project_id] = (pc[n.project_id] || 0) + 1; });
+      projectsEl.textContent = "";
+      if (!projects.length) {
+        const e = document.createElement("div");
+        e.className = "mem-folder";
+        e.innerHTML = '<span class="mem-folder-label" style="color:var(--ink-2)">— нет проектов —</span>';
+        projectsEl.appendChild(e);
+      }
+      projects.forEach((p) => {
+        const color = folderColor(p.title);
+        const d = document.createElement("div");
+        d.className = "mem-folder" + (activeProject === p.id ? " active" : "");
+        d.innerHTML =
+          '<span class="mem-dot" style="background:' + color + ';color:' + color + '"></span>' +
+          '<span class="mem-folder-label">' + escapeHtml(p.title) + "</span>" +
+          '<span class="mem-folder-count">' + (pc[p.id] || 0) + "</span>";
+        d.addEventListener("click", () => focusProject(p.id));
+        projectsEl.appendChild(d);
+      });
+
       // счётчики: по папкам + «без папки»
       const fc = {};
       let noFolderCount = 0;
@@ -436,16 +480,18 @@
 
     // ── Загрузка / обновление ──
     async function fetchData() {
-      const [m, l, t, f] = await Promise.all([
+      const [m, l, t, f, p] = await Promise.all([
         api("GET", "/api/memory"),
         api("GET", "/api/memory/links"),
         api("GET", "/api/tasks"),
         api("GET", "/api/memory/folders"),
+        api("GET", "/api/projects"),
       ]);
       notes = Array.isArray(m) ? m : [];
       links = Array.isArray(l) ? l : [];
       tasks = Array.isArray(t) ? t : [];
       folders = Array.isArray(f) ? f : [];
+      projects = Array.isArray(p) ? p : [];
     }
     // mode: 'full' (рандом + 150 итераций), 'relax' (40 итераций от текущих),
     //       'none' (без пересчёта позиций)
@@ -489,9 +535,11 @@
       const folderVal = note && note.folder ? note.folder : "";
       const known = [...new Set([...folders, ...localFolders])].sort((a, b) => a.localeCompare(b, "ru"));
       const dlOpts = known.map((f) => '<option value="' + escapeAttr(f) + '"></option>').join("");
+      const projOpts = projects.map((p) => '<option value="' + p.id + '"' + (note && note.project_id === p.id ? " selected" : "") + ">" + escapeHtml(p.title) + "</option>").join("");
       dossierBody.innerHTML =
         '<div class="dossier-field"><label>Заголовок</label><input id="d-title" type="text" value="' + (note ? escapeAttr(note.title) : "") + '"></div>' +
         '<div class="dossier-field"><label>Папка</label><input id="d-folder" type="text" list="folder-options" placeholder="(без папки)" value="' + escapeAttr(folderVal) + '"><datalist id="folder-options">' + dlOpts + "</datalist></div>" +
+        '<div class="dossier-field"><label>Проект</label><select id="d-project"><option value="">(без проекта)</option>' + projOpts + "</select></div>" +
         '<div class="dossier-field"><label>Содержимое (markdown, [[ссылки]])</label><textarea id="d-content">' + (note ? escapeHtml(note.content) : "") + "</textarea></div>" +
         '<div class="dossier-field"><label>Предпросмотр</label><div id="d-preview" class="mem-preview"></div></div>' +
         '<div class="dossier-actions"><button id="d-save" class="btn btn-primary">' + (note ? "Сохранить" : "Создать") + "</button>" +
@@ -539,7 +587,11 @@
     async function saveNote() {
       const title = byId("d-title").value.trim();
       if (!title) { alert("Заголовок обязателен"); return; }
-      const payload = { title, folder: byId("d-folder").value, content: byId("d-content").value };
+      const projVal = byId("d-project").value;
+      const payload = {
+        title, folder: byId("d-folder").value, content: byId("d-content").value,
+        project_id: projVal ? Number(projVal) : null,
+      };
       const editing = !!currentNote;
       const r = editing
         ? await api("PATCH", "/api/memory/" + currentNote.id, payload)
@@ -624,6 +676,14 @@
       if (!name) return;
       localFolders.add(name);   // в БД появится, когда сохранишь заметку в эту папку
       renderSidebar();
+    });
+    byId("mem-backfill").addEventListener("click", async () => {
+      if (!confirm("Завести проект на каждую папку и привязать заметки к ним? (папки останутся)")) return;
+      const r = await api("POST", "/api/projects/backfill-folders");
+      await reload("none");
+      if (r && typeof r.projects_created === "number") {
+        alert("Готово: проектов создано " + r.projects_created + ", заметок привязано " + r.notes_linked);
+      }
     });
     byId("dossier-close").addEventListener("click", closeDossier);
     dossierOv.addEventListener("click", closeDossier);

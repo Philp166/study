@@ -1310,12 +1310,12 @@ def delete_chat_fact_by_id(fact_id: int):
 
 # ── Долговременная память (long_term_memory) ──
 
-_MEMORY_FIELDS = {"title", "content", "folder", "status"}
+_MEMORY_FIELDS = {"title", "content", "folder", "status", "project_id"}
 
 # Wiki-ссылка [[Заголовок]] или [[Заголовок|алиас]] в markdown-теле заметки.
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
-_MEMORY_COLS = "id, title, content, folder, status, created_at, updated_at"
+_MEMORY_COLS = "id, title, content, folder, status, created_at, updated_at, project_id"
 
 
 def list_memory(folder: str | None = None, q: str | None = None) -> list[dict]:
@@ -1581,14 +1581,15 @@ def get_project_by_title(title: str) -> dict | None:
 
 
 def create_project(title: str, description: str = "") -> dict | None:
-    """Создаёт проект. Если проект с таким (точным) title уже есть → None (=409),
-    как у заметок. Проверка+вставка в одной транзакции."""
+    """Создаёт проект. Если проект с таким title уже есть (по нормализованному
+    trim+lower — не плодим «Инфра»/«инфра») → None (=409). Проверка+вставка в одной
+    транзакции."""
     t = (title or "").strip()
     if not t:
         return None
     now = time.time()
     with _connect() as conn:
-        cur = _execute(conn, f"SELECT id FROM projects WHERE title={_P}", (t,))
+        cur = _execute(conn, f"SELECT id FROM projects WHERE LOWER(TRIM(title))={_P}", (t.lower(),))
         if _fetchone(cur):
             return None
         new_id = _insert_returning_id(
@@ -1619,6 +1620,41 @@ def update_project(project_id: int, **fields) -> dict | None:
         _execute(conn, f"UPDATE projects SET {', '.join(sets)} WHERE id={_P}", vals)
         conn.commit()
     return get_project(project_id)
+
+
+def backfill_folders_to_projects() -> dict:
+    """Одноразово (идемпотентно): на каждую папку активных заметок заводит проект с
+    тем же названием и проставляет project_id заметкам этой папки, где он ещё NULL.
+    Поле folder НЕ удаляем (папки и проекты сосуществуют). Повторный вызов ничего не
+    добавит. Возвращает {projects_created, notes_linked}."""
+    created = linked = 0
+    for name in get_memory_folders():           # distinct non-null папки active-заметок
+        proj = get_project_by_title(name)
+        if proj is None:
+            proj = create_project(title=name)
+            if proj is not None:
+                created += 1
+        if proj is None:
+            continue
+        with _connect() as conn:
+            cur = _execute(
+                conn,
+                f"UPDATE long_term_memory SET project_id={_P} "
+                f"WHERE status='active' AND project_id IS NULL AND folder={_P}",
+                (proj["id"], name),
+            )
+            conn.commit()
+            n = getattr(cur, "rowcount", 0)
+            linked += n if (n and n > 0) else 0
+    return {"projects_created": created, "notes_linked": linked}
+
+
+def delete_project(project_id: int):
+    """Физическое удаление проекта. FK ON DELETE SET NULL отвяжет его заметки/задачи
+    (их project_id станет NULL), сами они не удаляются."""
+    with _connect() as conn:
+        _execute(conn, f"DELETE FROM projects WHERE id={_P}", (project_id,))
+        conn.commit()
 
 
 # Частотные служебные слова: при пороге ≥3 они иначе матчат %LIKE% почти всё и
@@ -1673,7 +1709,7 @@ def relevant_memory(text: str, limit: int = 5) -> list[dict]:
 
 # ── Буфер задач (tasks) ──
 
-_TASK_FIELDS = {"title", "context", "outcome", "status"}
+_TASK_FIELDS = {"title", "context", "outcome", "status", "project_id"}
 
 
 def list_tasks(status: str | None = None) -> list[dict]:

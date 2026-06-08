@@ -114,11 +114,14 @@ SYSTEM_PROMPT = """Ты — CoS (Chief of Staff), персональный оп�
 Если в памяти есть релевантная информация — используй. Если нет — не выдумывай. Отсутствие факта в срезе ≠ отсутствие в памяти (срез ограничен токен-бюджетом, показываются только релевантные заметки).
 Если пользователь спрашивает что-то, что ДОЛЖНО быть в памяти, но ты не видишь — скажи честно: "В моей текущей памяти этого нет, но я мог не подгрузить. Напомни, пожалуйста."
 
-### Как сохранять в память (инструменты save_memory / save_task / close_task)
+### Как сохранять в память (инструменты save_memory / save_task / close_task / create_project)
 Структуру записи ты определяешь сам — ты видишь весь диалог. Инструменты:
-- `save_memory(title, content, folder?)` — устойчивый факт (человек, проект, решение, предпочтение, стек). title короткий (2-5 слов); если заметка с таким title уже есть — твой content допишется к существующей, дубль не плодится.
-- `save_task(title, context?)` — задача (то, что нужно сделать/отслеживать).
+- `save_memory(title, content, folder?, project?)` — устойчивый факт (человек, проект, решение, предпочтение, стек). title короткий (2-5 слов); если заметка с таким title уже есть — твой content допишется к существующей, дубль не плодится.
+- `save_task(title, context?, project?)` — задача (то, что нужно сделать/отслеживать).
 - `close_task(title, outcome?)` — закрыть активную задачу по её названию (бери title из среза «Активные задачи»).
+- `create_project(title, description?)` — создать проект-КОНТЕЙНЕР (это НЕ заметка!). Зови, когда пользователь явно просит «создай/заведи проект X». Существующие проекты перечислены в срезе «Проекты» — не дублируй, переиспользуй название.
+
+Проекты: если пользователь просит создать проект — это `create_project`, а НЕ `save_memory`. Чтобы отнести заметку/задачу к проекту, передай его название в поле `project` у save_memory/save_task (если проекта ещё нет — он создастся автоматически).
 
 Правила:
 - Зови эти инструменты ТОЛЬКО по ЯВНОЙ просьбе пользователя («запомни», «сохрани», «запиши задачу», «задача сделана», «заполни память»). В обычном разговоре в память не лезь.
@@ -158,6 +161,7 @@ MEMORY_TOOLS = [
                 "title": {"type": "string", "description": "Короткий заголовок заметки (2-5 слов)."},
                 "content": {"type": "string", "description": "Содержательный текст со всеми деталями; связи как [[Имя]]."},
                 "folder": {"type": "string", "description": "Папка/категория, если очевидна (например «Офис»). Опционально."},
+                "project": {"type": "string", "description": "Название проекта-контейнера, к которому отнести заметку (если проекта нет — создастся). Опционально."},
             },
             "required": ["title", "content"],
         },
@@ -174,6 +178,7 @@ MEMORY_TOOLS = [
             "properties": {
                 "title": {"type": "string", "description": "Короткое название задачи."},
                 "context": {"type": "string", "description": "Детали задачи (дедлайн, шаги). Опционально."},
+                "project": {"type": "string", "description": "Название проекта-контейнера, к которому отнести задачу (если проекта нет — создастся). Опционально."},
             },
             "required": ["title"],
         },
@@ -194,37 +199,64 @@ MEMORY_TOOLS = [
             "required": ["title"],
         },
     },
+    {
+        "name": "create_project",
+        "description": (
+            "Создать проект-контейнер (не заметку!) для группировки заметок и задач. "
+            "Вызывай по явной просьбе («создай проект X», «заведи проект»). title — "
+            "название проекта; description — короткое описание (опционально). Если проект "
+            "с таким названием уже есть — повторно не создавай, он уже в срезе «Проекты»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Название проекта."},
+                "description": {"type": "string", "description": "Краткое описание проекта. Опционально."},
+            },
+            "required": ["title"],
+        },
+    },
 ]
 
-MEMORY_TOOL_NAMES = {"save_memory", "save_task", "close_task"}
+MEMORY_TOOL_NAMES = {"save_memory", "save_task", "close_task", "create_project"}
 
 
 def build_suggestion(name: str, tool_input: dict | None) -> dict | None:
     """Маппит вызов типизированного инструмента памяти в предложение
-    {"task": ..|None, "memory": ..|None} — ту же форму, что потребляют карточка
-    подтверждения и _apply_suggestion. Структуру решает сам агент; здесь только
-    раскладка по слотам и нормализация. Возвращает None, если нет обязательного
-    title или имя инструмента неизвестно (вызывающий вернёт агенту понятную ошибку).
-    Чистая функция — без БД и сети, поэтому легко тестируется."""
+    {"task": ..|None, "memory": ..|None, "project": ..|None} — ту же форму, что
+    потребляют карточка подтверждения и _apply_suggestion. Структуру решает сам
+    агент; здесь только раскладка по слотам и нормализация. Возвращает None, если
+    нет обязательного title или имя инструмента неизвестно (вызывающий вернёт агенту
+    понятную ошибку). Чистая функция — без БД и сети, поэтому легко тестируется."""
     inp = tool_input or {}
     title = (inp.get("title") or "").strip()
     if not title:
         return None
+    project = inp.get("project")
+    project = project.strip() if isinstance(project, str) and project.strip() else None
     if name == "save_memory":
         memory = {"action": "create", "title": title,
                   "content": (inp.get("content") or "").strip()}
         folder = inp.get("folder")
         if isinstance(folder, str) and folder.strip():
             memory["folder"] = folder.strip()
-        return {"task": None, "memory": memory}
+        if project:
+            memory["project"] = project
+        return {"task": None, "memory": memory, "project": None}
     if name == "save_task":
-        return {"task": {"action": "create", "title": title,
-                         "context": (inp.get("context") or "").strip()},
-                "memory": None}
+        task = {"action": "create", "title": title,
+                "context": (inp.get("context") or "").strip()}
+        if project:
+            task["project"] = project
+        return {"task": task, "memory": None, "project": None}
     if name == "close_task":
         return {"task": {"action": "close", "title": title,
                          "outcome": (inp.get("outcome") or "").strip()},
-                "memory": None}
+                "memory": None, "project": None}
+    if name == "create_project":
+        return {"task": None, "memory": None,
+                "project": {"action": "create", "title": title,
+                            "description": (inp.get("description") or "").strip()}}
     return None
 
 MAX_TOOL_ITERATIONS = 6

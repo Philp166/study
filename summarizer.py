@@ -53,11 +53,12 @@ def build_system_prompt(
     facts: list[dict] | None = None,
     memory_block: str | None = None,
     tasks_block: str | None = None,
+    projects_block: str | None = None,
 ) -> str:
-    """base_prompt + долговременная память + задачи + summary + блок фактов.
+    """base_prompt + долговременная память + задачи + проекты + summary + факты.
 
-    Память и задачи идут ПЕРЕД summary/facts: они стабильнее (живут между чатами)
-    и менее «свежие», чем summary/facts текущего диалога.
+    Память/задачи/проекты идут ПЕРЕД summary/facts: они стабильнее (живут между
+    чатами) и менее «свежие», чем summary/facts текущего диалога.
     """
     parts = [base_prompt]
 
@@ -65,6 +66,8 @@ def build_system_prompt(
         parts.append(memory_block)
     if tasks_block:
         parts.append(tasks_block)
+    if projects_block:
+        parts.append(projects_block)
 
     if summary_text:
         parts.append(
@@ -326,6 +329,18 @@ def _render_tasks_block(tasks: list[dict]) -> str:
     return "".join(lines)
 
 
+def _render_projects_block(projects: list[dict]) -> str:
+    """Краткий срез активных проектов (контейнеров): агент видит, какие проекты уже
+    есть, чтобы относить к ним записи и не плодить дубли."""
+    if not projects:
+        return ""
+    lines = ["\n\n# Проекты\n"]
+    for p in projects:
+        desc = (p.get("description") or "").strip()[:TASK_CONTEXT_CAP]
+        lines.append(f"\n## {p['title']}" + ("\n" + desc if desc else ""))
+    return "".join(lines)
+
+
 def build_memory_blocks(
     notes: list[dict], tasks: list[dict]
 ) -> tuple[str | None, str | None]:
@@ -414,11 +429,14 @@ def prepare_context(
     # E0: Долговременная память + активные задачи (глобальные, между чатами).
     # Только для текстового пути (inject_memory=True). Память НЕ влияет на порог
     # суммаризации (maybe_summarize строит промпт без этих блоков).
-    memory_block = tasks_block = None
+    memory_block = tasks_block = projects_block = None
     if inject_memory:
         notes = db.relevant_memory(user_message or "", limit=5)
         active_tasks = db.list_tasks(status="active")
         memory_block, tasks_block = build_memory_blocks(notes, active_tasks)
+        projects = db.list_projects(status="active")
+        if projects:
+            projects_block = _render_projects_block(projects)
 
     # E: Build system prompt with branch-active facts
     facts = None
@@ -430,6 +448,7 @@ def prepare_context(
     system_prompt = build_system_prompt(
         base_system_prompt, summary_text, facts,
         memory_block=memory_block, tasks_block=tasks_block,
+        projects_block=projects_block,
     )
 
     return system_prompt, messages
