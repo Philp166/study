@@ -744,8 +744,17 @@ def _apply_suggestion(task, memory, project=None) -> dict:
 
 @app.post("/api/suggestion/apply")
 def api_apply_suggestion(body: dict):
-    """Применить предложение памяти (кнопка «Подтвердить» на фронте)."""
-    saved = _apply_suggestion(body.get("task"), body.get("memory"), body.get("project"))
+    """Применить предложение(я) памяти (кнопка «Подтвердить» на фронте). Принимает
+    список `items` (карточка-список) ИЛИ одиночные task/memory/project (back-compat).
+    Возвращает saved-список по каждому элементу."""
+    items = body.get("items")
+    if not isinstance(items, list):
+        items = [{"task": body.get("task"), "memory": body.get("memory"),
+                  "project": body.get("project")}]
+    saved = [
+        _apply_suggestion(it.get("task"), it.get("memory"), it.get("project"))
+        for it in items if isinstance(it, dict)
+    ]
     return {"ok": True, "saved": saved}
 
 
@@ -943,8 +952,8 @@ def _stream_chat_response(chat_id: str, model: str,
     )
 
     def generate():
-        applied = []                                            # автосохранённые (тост)
-        pending = {"task": None, "memory": None, "project": None}  # отложено (одна карточка)
+        applied = []         # автосохранённые (тост)
+        pending_items = []   # СПИСОК отложенных предложений за ход (карточка-список)
 
         def tool_handler(name, tool_input):
             if name == "search_memory":
@@ -953,18 +962,13 @@ def _stream_chat_response(chat_id: str, model: str,
             if sug is None:
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
                         "инструмент — ничего не сохранил.")
-            task, memory, project = sug.get("task"), sug.get("memory"), sug.get("project")
             if db.get_setting("memory_autosave", "false") == "true":
-                saved = _apply_suggestion(task, memory, project)
+                saved = _apply_suggestion(sug.get("task"), sug.get("memory"), sug.get("project"))
                 applied.append(saved)
                 return _tool_result_msg(saved)
-            # autosave off: копим все вызовы за ход в одну карточку подтверждения
-            if task:
-                pending["task"] = task
-            if memory:
-                pending["memory"] = memory
-            if project:
-                pending["project"] = project
+            # autosave off: копим КАЖДЫЙ вызов отдельным пунктом одной карточки
+            # подтверждения (раньше одиночные слоты схлопывали несколько записей).
+            pending_items.append(sug)
             return "Подготовил запись и показал пользователю карточку подтверждения."
 
         full_text = ""
@@ -996,8 +1000,8 @@ def _stream_chat_response(chat_id: str, model: str,
 
             for saved in applied:
                 yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
-            if pending["task"] or pending["memory"] or pending["project"]:
-                yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': pending['task'], 'memory': pending['memory'], 'project': pending['project']})}\n\n"
+            if pending_items:
+                yield f"data: {json.dumps({'type': 'memory_suggestion', 'items': pending_items})}\n\n"
 
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
@@ -1130,16 +1134,16 @@ def _is_affirmative(text: str) -> bool:
     return bool(_AFFIRMATIVE_RE.search(t))
 
 
-def _resolve_voice_pending(chat_id, text) -> dict | None:
-    """Если для chat_id есть отложенная запись: применить её при устном «да», иначе
-    снять (пользователь не подтвердил/сменил тему). Возвращает saved-словарь, если
-    применили, иначе None."""
+def _resolve_voice_pending(chat_id, text) -> list:
+    """Если для chat_id есть отложенные записи (список): применить ВСЕ при устном
+    «да», иначе снять (не подтвердил/сменил тему). Возвращает список saved-словарей
+    (пустой, если нечего применять или не подтвердили)."""
     if not chat_id or chat_id not in _VOICE_PENDING:
-        return None
+        return []
     pend = _VOICE_PENDING.pop(chat_id)
-    if _is_affirmative(text):
-        return _apply_suggestion(pend.get("task"), pend.get("memory"), pend.get("project"))
-    return None
+    if not _is_affirmative(text):
+        return []
+    return [_apply_suggestion(s.get("task"), s.get("memory"), s.get("project")) for s in pend]
 
 
 @app.post("/voice/chat/stream")
@@ -1155,7 +1159,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
     # Устное «да» применяет запись, отложенную на прошлой реплике (только при OFF).
     # Если тумблер успели включить — снимаем устаревшее отложенное (иначе оно зависло
     # бы и применилось позже на несвязанном «да»).
-    voice_pending_saved = None
+    voice_pending_saved = []
     if voice_autosave:
         _VOICE_PENDING.pop(req.chat_id, None)
     else:
@@ -1178,9 +1182,9 @@ async def voice_chat_stream(req: VoiceChatRequest):
         voice_system = voice_base
 
     async def generate():
-        # Сообщаем фронту о записи, применённой устным «да» в начале этой реплики.
-        if voice_pending_saved is not None:
-            yield f"data: {json.dumps({'type': 'memory_saved', 'saved': voice_pending_saved})}\n\n"
+        # Сообщаем фронту о записях, применённых устным «да» в начале этой реплики.
+        for _saved in voice_pending_saved:
+            yield f"data: {json.dumps({'type': 'memory_saved', 'saved': _saved})}\n\n"
         text_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -1192,10 +1196,10 @@ async def voice_chat_stream(req: VoiceChatRequest):
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
                         "инструмент — ничего не сохранил.")
             if not voice_autosave:
-                # OFF: не пишем сразу — кладём в pending, применим по устному «да»
-                # на следующей реплике (бэкенд-подтверждение, тумблер реально работает).
+                # OFF: не пишем сразу — копим в pending (список), применим ВСЕ по
+                # устному «да» на следующей реплике (тумблер реально работает).
                 if req.chat_id:
-                    _VOICE_PENDING[req.chat_id] = sug
+                    _VOICE_PENDING.setdefault(req.chat_id, []).append(sug)
                     return ("Подготовил запись, но пока НЕ сохранил. Переспроси у пользователя "
                             "вслух «Сохранить это в память?» — применю после устного «да».")
                 return ("Без активного чата не могу отложить подтверждение голосом — "

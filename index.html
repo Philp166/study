@@ -258,7 +258,7 @@
     let currentTree = [];       // все сообщения чата [{id, role, content, parent_message_id}]
     let currentLeaf = null;     // current_leaf_message_id активной ветки
     let streaming = false;      // идёт стрим ответа — блокирует повторную отправку
-    let pendingSuggestion = null; // неподтверждённое предложение памяти {task, memory} (Фаза 3)
+    let pendingSuggestion = null; // null | СПИСОК неподтверждённых предложений [{task,memory,project}]
 
     const FORK_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>';
 
@@ -757,7 +757,7 @@
               }
               if (data.type === "usage") updateTokenPanel(data);
               if (data.type === "memory_suggestion") {
-                if (data.task || data.memory || data.project) pendingSuggestion = { task: data.task || null, memory: data.memory || null, project: data.project || null };
+                if (Array.isArray(data.items) && data.items.length) pendingSuggestion = data.items;
               }
               if (data.type === "suggestion_applied") {
                 pendingSuggestion = null;
@@ -790,13 +790,10 @@
       return d.innerHTML;
     }
 
-    function renderSuggestionBlock() {
-      if (!pendingSuggestion) return;
-      const bodies = transcriptEl.querySelectorAll(".msg-wrap.bot .msg-body");
-      const host = bodies[bodies.length - 1];
-      if (!host) return;
-      const { task, memory, project } = pendingSuggestion;
-      let html = '<div class="mem-suggestion-title">📝 Предлагаю сохранить:</div>';
+    // HTML одного предложения {task?, memory?, project?} — карточка может содержать список.
+    function _sugItemHtml(it) {
+      const { task, memory, project } = it || {};
+      let html = "";
       if (project) {
         html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">Проект</span>'
           + _sugEsc(project.title || "")
@@ -820,6 +817,17 @@
           + _sugEsc(memory.title || ("#" + (memory.id || ""))) + folder + proj
           + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
       }
+      return html;
+    }
+
+    function renderSuggestionBlock() {
+      if (!pendingSuggestion || !pendingSuggestion.length) return;
+      const bodies = transcriptEl.querySelectorAll(".msg-wrap.bot .msg-body");
+      const host = bodies[bodies.length - 1];
+      if (!host) return;
+      const n = pendingSuggestion.length;
+      let html = '<div class="mem-suggestion-title">📝 Предлагаю сохранить' + (n > 1 ? ' (' + n + '):' : ':') + '</div>';
+      pendingSuggestion.forEach((it) => { html += _sugItemHtml(it); });
       const box = document.createElement("div");
       box.className = "mem-suggestion";
       box.innerHTML = html;
@@ -840,17 +848,23 @@
     }
 
     async function confirmSuggestion(box, always) {
-      if (!pendingSuggestion) return;
-      const sug = pendingSuggestion;
+      if (!pendingSuggestion || !pendingSuggestion.length) return;
+      const items = pendingSuggestion;
       pendingSuggestion = null;        // защита от двойного применения
       box.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      const n = items.length;
       try {
-        await api("POST", "/api/suggestion/apply", sug);
+        const r = await api("POST", "/api/suggestion/apply", { items });
+        const saved = (r && Array.isArray(r.saved)) ? r.saved : [];
+        const ok = saved.filter((s) => s && (s.memory || s.task || s.project)).length;
+        const label = ok >= n
+          ? "✓ Сохранено (" + ok + ")"
+          : "✓ Сохранено " + ok + " из " + n + " (часть не записалась)";
         if (always) {
           await api("PATCH", "/api/settings", { memory_autosave: "true" });
-          box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено. Дальше сохраняю автоматически.</div>';
+          box.innerHTML = '<div class="mem-suggestion-saved">' + label + '. Дальше сохраняю автоматически.</div>';
         } else {
-          box.innerHTML = '<div class="mem-suggestion-saved">✓ Сохранено</div>';
+          box.innerHTML = '<div class="mem-suggestion-saved">' + label + '</div>';
         }
       } catch {
         box.innerHTML = '<div class="mem-suggestion-saved">Ошибка сохранения</div>';

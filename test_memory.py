@@ -540,27 +540,59 @@ def test_is_affirmative():
 
 def test_resolve_voice_pending_applies_on_yes(fresh_db):
     cid = "voice-yes"
-    app._VOICE_PENDING[cid] = {
-        "task": None, "project": None,
-        "memory": {"action": "create", "title": "Сервер", "content": "prod"}}
+    app._VOICE_PENDING[cid] = [
+        {"task": None, "project": None,
+         "memory": {"action": "create", "title": "Сервер", "content": "prod"}}]
     saved = app._resolve_voice_pending(cid, "да, сохрани")
-    assert saved is not None and saved["memory"] is True
+    assert len(saved) == 1 and saved[0]["memory"] is True
     assert cid not in app._VOICE_PENDING            # очищено
     assert db.list_memory(q="Сервер")               # реально записано
 
 
+def test_resolve_voice_pending_applies_multiple(fresh_db):
+    cid = "voice-multi"
+    app._VOICE_PENDING[cid] = [
+        {"task": None, "project": None,
+         "memory": {"action": "create", "title": "Аня", "content": "дизайнер"}},
+        {"task": {"action": "create", "title": "Демо", "context": "в пятницу"},
+         "memory": None, "project": None},
+    ]
+    saved = app._resolve_voice_pending(cid, "ага, давай")
+    assert len(saved) == 2
+    assert db.list_memory(q="Аня") and db.find_active_task_by_title("Демо")
+
+
 def test_resolve_voice_pending_drops_on_no(fresh_db):
     cid = "voice-no"
-    app._VOICE_PENDING[cid] = {
-        "task": None, "project": None,
-        "memory": {"action": "create", "title": "X", "content": "y"}}
-    assert app._resolve_voice_pending(cid, "нет, потом") is None
+    app._VOICE_PENDING[cid] = [
+        {"task": None, "project": None,
+         "memory": {"action": "create", "title": "X", "content": "y"}}]
+    assert app._resolve_voice_pending(cid, "нет, потом") == []
     assert cid not in app._VOICE_PENDING            # снято (не подтвердили)
     assert db.list_memory() == []                   # не записано
 
 
 def test_resolve_voice_pending_absent(fresh_db):
-    assert app._resolve_voice_pending("nope", "да") is None
+    assert app._resolve_voice_pending("nope", "да") == []
+
+
+# ── Карточка-список: api_apply_suggestion с items[] ──
+
+def test_api_apply_suggestion_items_list(fresh_db):
+    body = {"items": [
+        {"memory": {"action": "create", "title": "Команда", "content": "Аня, Петя"}},
+        {"task": {"action": "create", "title": "Оффер", "context": "среда"}},
+        {"project": {"action": "create", "title": "Запуск"}},
+    ]}
+    res = app.api_apply_suggestion(body)
+    assert res["ok"] is True and len(res["saved"]) == 3
+    assert db.list_memory(q="Команда") and db.find_active_task_by_title("Оффер")
+    assert db.get_project_by_title("Запуск") is not None
+
+
+def test_api_apply_suggestion_backcompat_single(fresh_db):
+    res = app.api_apply_suggestion({"memory": {"action": "create", "title": "X", "content": "y"}})
+    assert res["ok"] is True and len(res["saved"]) == 1 and res["saved"][0]["memory"] is True
 
 
 # ── Этап 4: кап активных задач в инжекте ──
