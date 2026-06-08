@@ -1674,37 +1674,141 @@ _STOPWORDS = frozenset({
 })
 
 
+# Простой стемминг русского: усечение частых словоизменительных окончаний, чтобы
+# «диагностику» матчила «диагностика». Не лингвистически точно — задача лишь свести
+# словоформы к общему началу для LIKE-поиска. Длиннейший суффикс первым; стем ≥4.
+_RU_SUFFIXES = sorted([
+    "ами", "ями", "ого", "его", "ему", "ому", "ыми", "ими", "ах", "ях", "ов",
+    "ев", "ёв", "ам", "ям", "ом", "ем", "ой", "ый", "ий", "ая", "яя", "ую", "юю",
+    "ые", "ие", "их", "ых", "ее", "ть", "а", "я", "о", "е", "у", "ю", "ы", "и",
+    "й", "ь",
+], key=len, reverse=True)
+
+
+def _stem(w: str) -> str:
+    for suf in _RU_SUFFIXES:
+        if len(w) - len(suf) >= 4 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _query_stems(text: str) -> list[str]:
+    """Стемы значимых слов запроса: без стоп-слов, длина исходного слова ≥3,
+    уникальные, не больше 8. Стем ≥3 символов."""
+    out, seen = [], set()
+    for w in re.findall(r"\w+", (text or "").lower()):
+        if len(w) < 3 or w in _STOPWORDS:
+            continue
+        s = _stem(w)
+        if len(s) >= 3 and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:8]
+
+
+def _match_active_notes(conn, stems: list[str], cols: str) -> list[dict]:
+    """active-заметки, где встречается хотя бы один стем (LIKE по title/content).
+    LIKE — лишь грубый префильтр (символ `_` в стеме работал бы как wildcard);
+    истинный отбор/ранжирование делает _score_by_stems по литеральному вхождению.
+    LIMIT — предохранитель от загрузки гигантской выборки в память."""
+    clauses, params = [], []
+    for s in stems:
+        like = f"%{s}%"
+        clauses.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
+        params.extend([like, like])
+    cur = _execute(
+        conn,
+        f"SELECT {cols} FROM long_term_memory "
+        f"WHERE status='active' AND ({' OR '.join(clauses)}) "
+        f"ORDER BY updated_at DESC LIMIT 500",
+        params,
+    )
+    return _fetchall(cur)
+
+
+def _score_by_stems(rows: list[dict], stems: list[str]) -> list[dict]:
+    """Сортировка по числу совпавших уникальных стемов (затем свежесть). Строки с
+    нулём совпадений ОТБРАСЫВАЕМ: это ложные срабатывания грубого LIKE-префильтра
+    (напр. `_` как wildcard) — иначе нерелевантные заметки утекли бы в инжект
+    (реанимация канала бага B). Python-вхождение здесь — источник истины."""
+    scored = []
+    for r in rows:
+        hay = ((r.get("title") or "") + " " + (r.get("content") or "")).lower()
+        score = sum(1 for s in stems if s in hay)
+        if score:
+            scored.append((score, r.get("updated_at") or 0, r))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [r for _, _, r in scored]
+
+
 def relevant_memory(text: str, limit: int = 5) -> list[dict]:
-    """Релевантные активные заметки: поиск по ключевым словам сообщения
-    (OR LIKE по title/content), сортировка по свежести. Если ни одно слово не
-    совпало — возвращает [] и НЕ подставляет «последние свежие»: ложные совпадения
-    засоряли бы дедуп при записи и инжект при чтении (канал бага B). Возвращает
-    [{id, title, content_preview, folder}]."""
-    words = [w for w in re.findall(r"\w+", (text or "").lower())
-             if len(w) >= 3 and w not in _STOPWORDS]
-    words = list(dict.fromkeys(words))[:8]  # уникальные, не больше 8
+    """Релевантные активные заметки для пред-инжекта в системпромпт. Поиск по стемам
+    значимых слов сообщения (LIKE по title/content), ранг по числу совпавших слов
+    (не по свежести). Если ни одно слово не совпало — [] (без фолбэка «последние
+    свежие» — канал бага B). Возвращает [{id, title, content_preview, folder}].
+    Дедуп при записи теперь делает БД по title — отдельного memory_for_dedup не нужно."""
+    stems = _query_stems(text)
     lim = max(1, int(limit))
-    if not words:
+    if not stems:
         return []
     with _connect() as conn:
-        clauses, params = [], []
-        for w in words:
-            like = f"%{w}%"
-            clauses.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
-            params.extend([like, like])
-        cur = _execute(
-            conn,
-            f"SELECT id, title, content, folder FROM long_term_memory "
-            f"WHERE status='active' AND ({' OR '.join(clauses)}) "
-            f"ORDER BY updated_at DESC LIMIT {lim}",
-            params,
-        )
-        rows = _fetchall(cur)
+        rows = _match_active_notes(conn, stems, "id, title, content, folder, updated_at")
+    ranked = _score_by_stems(rows, stems)[:lim]
     return [
         {"id": r["id"], "title": r["title"], "content_preview": (r["content"] or "")[:300],
          "folder": r["folder"]}
-        for r in rows
+        for r in ranked
     ]
+
+
+def search_memory(query: str, limit: int = 8) -> list[dict]:
+    """Агентный retrieval: ищет заметки по запросу (стемминг + ранг по совпавшим
+    словам) и обогащает результат проектом и исходящими связями [[..]] — чтобы агент
+    мог достать факт по требованию и идти по связям. Возвращает [{id, title, content,
+    folder, project, links:[target_title], score}]. [] если запрос пуст/нет совпадений."""
+    stems = _query_stems(query)
+    lim = max(1, int(limit))
+    if not stems:
+        return []
+    with _connect() as conn:
+        rows = _match_active_notes(
+            conn, stems, "id, title, content, folder, project_id, updated_at")
+        ranked = _score_by_stems(rows, stems)[:lim]
+        if not ranked:
+            return []
+        ids = [r["id"] for r in ranked]
+        ph = ",".join([_P] * len(ids))
+        # проекты
+        proj_map = {}
+        proj_ids = [r["project_id"] for r in ranked if r.get("project_id")]
+        if proj_ids:
+            pph = ",".join([_P] * len(proj_ids))
+            cur = _execute(conn, f"SELECT id, title FROM projects WHERE id IN ({pph})", proj_ids)
+            proj_map = {p["id"]: p["title"] for p in _fetchall(cur)}
+        # исходящие связи каждой найденной заметки
+        cur = _execute(
+            conn,
+            f"SELECT source_id, target_title FROM memory_links WHERE source_id IN ({ph}) "
+            f"ORDER BY id",
+            ids,
+        )
+        links_by_src = {}
+        for r in _fetchall(cur):
+            links_by_src.setdefault(r["source_id"], []).append(r["target_title"])
+    hay_stems = stems
+    out = []
+    for r in ranked:
+        hay = ((r.get("title") or "") + " " + (r.get("content") or "")).lower()
+        out.append({
+            "id": r["id"],
+            "title": r["title"],
+            "content": (r["content"] or "")[:600],
+            "folder": r["folder"],
+            "project": proj_map.get(r.get("project_id")),
+            "links": links_by_src.get(r["id"], []),
+            "score": sum(1 for s in hay_stems if s in hay),
+        })
+    return out
 
 
 # ── Буфер задач (tasks) ──

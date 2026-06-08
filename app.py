@@ -617,6 +617,31 @@ def _tool_result_msg(saved: dict) -> str:
     return "Сохранять было нечего."
 
 
+def _format_search_results(results: list) -> str:
+    """Читаемый агентом текст из результатов db.search_memory (для tool-результата)."""
+    if not results:
+        return "По запросу в памяти ничего не нашёл."
+    lines = []
+    for r in results:
+        meta = []
+        if r.get("project"):
+            meta.append("проект: " + r["project"])
+        if r.get("folder"):
+            meta.append("папка: " + r["folder"])
+        head = r.get("title") or ""
+        if meta:
+            head += " (" + ", ".join(meta) + ")"
+        block = "• " + head
+        body = (r.get("content") or "").strip()
+        if body:
+            block += "\n  " + body
+        links = r.get("links") or []
+        if links:
+            block += "\n  связи: " + ", ".join("[[" + t + "]]" for t in links)
+        lines.append(block)
+    return "Нашёл в памяти:\n" + "\n".join(lines)
+
+
 def _apply_suggestion(task, memory, project=None) -> dict:
     """Применяет структурированное предложение (от типизированных инструментов агента
     или кнопки подтверждения) к БД. При коллизии title у memory.create НЕ теряем
@@ -912,6 +937,8 @@ def _stream_chat_response(chat_id: str, model: str,
         pending = {"task": None, "memory": None, "project": None}  # отложено (одна карточка)
 
         def tool_handler(name, tool_input):
+            if name == "search_memory":
+                return _format_search_results(db.search_memory((tool_input or {}).get("query") or ""))
             sug = build_suggestion(name, tool_input)
             if sug is None:
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
@@ -1098,6 +1125,8 @@ async def voice_chat_stream(req: VoiceChatRequest):
         def voice_tool_handler(name, tool_input):
             # Голос сохраняет НАПРЯМУЮ: карточки подтверждения нет, согласие даётся
             # голосом (по промпту), поэтому к моменту вызова решение уже принято.
+            if name == "search_memory":
+                return _format_search_results(db.search_memory((tool_input or {}).get("query") or ""))
             sug = build_suggestion(name, tool_input)
             if sug is None:
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "

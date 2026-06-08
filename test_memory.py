@@ -458,3 +458,64 @@ def test_create_project_normalized_dedup(fresh_db):
     assert db.create_project(title="  инфра ") is None     # нормализованный дубль не создаём
     assert app._resolve_or_create_project_id("ИНФРА") == p["id"]
     assert len(db.list_projects()) == 1
+
+
+# ── Этап 3: стемминг ──
+
+def test_stem_inflections_collapse():
+    assert db._stem("диагностику") == db._stem("диагностика")
+    assert db._stem("проекту") == db._stem("проект") == "проект"
+    assert db._stem("офис") == "офис"        # коротких/без окончания не трогаем
+    assert db._stem("api") == "api"
+
+
+def test_query_stems_filters_and_stems():
+    stems = db._query_stems("Провёл диагностику по проекту, ок")
+    assert "ок" not in stems                  # <3
+    assert db._stem("диагностику") in stems
+    assert db._stem("проекту") in stems
+
+
+# ── Этап 3: relevant_memory стемминг + скоринг ──
+
+def test_relevant_memory_matches_inflected_form(fresh_db):
+    db.create_memory(title="Диагностика сети", content="проверка узлов")
+    res = db.relevant_memory("надо сделать диагностику сети")
+    assert [r["title"] for r in res] == ["Диагностика сети"]
+
+
+def test_relevant_memory_ranks_by_matched_words(fresh_db):
+    a = db.create_memory(title="Проект Альфа", content="дедлайн пятница")
+    b = db.create_memory(title="Проект Бета", content="встреча")
+    res = db.relevant_memory("проект альфа дедлайн")
+    # обе содержат «проект», но Альфа совпадает по 3 словам → выше
+    assert res[0]["id"] == a["id"]
+    assert b["id"] in [r["id"] for r in res]
+
+
+# ── Этап 3: search_memory (агентный retrieval) ──
+
+def test_search_memory_empty_and_no_match(fresh_db):
+    db.create_memory(title="Сервер", content="prod")
+    assert db.search_memory("") == []
+    assert db.search_memory("совершенно несвязанный зонтик") == []
+
+
+def test_search_memory_returns_content_project_links(fresh_db):
+    p = db.create_project(title="Инфра")
+    a = db.create_memory(title="Альфа", content="связана с [[Бета]]")
+    db.update_memory(a["id"], project_id=p["id"])
+    db.create_memory(title="Бета", content="деталь")
+    res = db.search_memory("Альфа")
+    item = [r for r in res if r["title"] == "Альфа"][0]
+    assert item["content"].startswith("связана")
+    assert item["project"] == "Инфра"
+    assert "Бета" in item["links"]
+    assert item["score"] >= 1
+
+
+def test_format_search_results():
+    assert "ничего не нашёл" in app._format_search_results([])
+    txt = app._format_search_results([
+        {"title": "X", "content": "тело", "folder": "F", "project": "P", "links": ["Y"]}])
+    assert "X" in txt and "проект: P" in txt and "[[Y]]" in txt
