@@ -27,6 +27,7 @@ import pytest
 import agent
 import app
 import db
+import summarizer
 
 
 @pytest.fixture
@@ -519,3 +520,62 @@ def test_format_search_results():
     txt = app._format_search_results([
         {"title": "X", "content": "тело", "folder": "F", "project": "P", "links": ["Y"]}])
     assert "X" in txt and "проект: P" in txt and "[[Y]]" in txt
+
+
+# ── Этап 4: голос уважает autosave (pending + устное «да») ──
+
+def test_is_affirmative():
+    assert app._is_affirmative("да, сохрани")
+    assert app._is_affirmative("Ага")
+    assert app._is_affirmative("конечно, давай")
+    assert app._is_affirmative("ладно")
+    assert not app._is_affirmative("нет, не надо")
+    assert not app._is_affirmative("расскажи про погоду")
+    # отрицание перекрывает согласие (иначе молчаливая запись против воли)
+    assert not app._is_affirmative("не сохраняй")
+    assert not app._is_affirmative("конечно нет")
+    assert not app._is_affirmative("да не надо")
+    assert not app._is_affirmative("передумал")
+
+
+def test_resolve_voice_pending_applies_on_yes(fresh_db):
+    cid = "voice-yes"
+    app._VOICE_PENDING[cid] = {
+        "task": None, "project": None,
+        "memory": {"action": "create", "title": "Сервер", "content": "prod"}}
+    saved = app._resolve_voice_pending(cid, "да, сохрани")
+    assert saved is not None and saved["memory"] is True
+    assert cid not in app._VOICE_PENDING            # очищено
+    assert db.list_memory(q="Сервер")               # реально записано
+
+
+def test_resolve_voice_pending_drops_on_no(fresh_db):
+    cid = "voice-no"
+    app._VOICE_PENDING[cid] = {
+        "task": None, "project": None,
+        "memory": {"action": "create", "title": "X", "content": "y"}}
+    assert app._resolve_voice_pending(cid, "нет, потом") is None
+    assert cid not in app._VOICE_PENDING            # снято (не подтвердили)
+    assert db.list_memory() == []                   # не записано
+
+
+def test_resolve_voice_pending_absent(fresh_db):
+    assert app._resolve_voice_pending("nope", "да") is None
+
+
+# ── Этап 4: кап активных задач в инжекте ──
+
+def test_tasks_block_truncation_note():
+    tasks = [{"title": f"T{i}", "context": ""} for i in range(3)]
+    assert "показаны" in summarizer._render_tasks_block(tasks, total=10)
+    assert "из 10" in summarizer._render_tasks_block(tasks, total=10)
+    assert "показаны" not in summarizer._render_tasks_block(tasks, total=3)
+
+
+def test_build_memory_blocks_passes_tasks_total():
+    _, tb = summarizer.build_memory_blocks([], [{"title": "T1", "context": ""}], tasks_total=5)
+    assert tb is not None and "показаны" in tb
+
+
+def test_max_injected_tasks_constant():
+    assert isinstance(summarizer.MAX_INJECTED_TASKS, int) and summarizer.MAX_INJECTED_TASKS > 0

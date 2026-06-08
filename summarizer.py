@@ -300,6 +300,8 @@ def extract_and_apply_facts(
 
 MEMORY_TOKEN_BUDGET = 1500   # суммарно на блок памяти + блок задач
 TASK_CONTEXT_CAP = 500       # защитный кап на context одной задачи (живой документ)
+MAX_INJECTED_TASKS = 12      # сколько активных задач максимум вливать (свежайшие);
+                             # без лимита они вытесняли заметки из бюджета
 
 
 def _estimate_tokens(text: str) -> int:
@@ -321,11 +323,13 @@ def _render_memory_block(notes: list[dict], content_cap: int | None = None) -> s
     return "".join(lines)
 
 
-def _render_tasks_block(tasks: list[dict]) -> str:
+def _render_tasks_block(tasks: list[dict], total: int | None = None) -> str:
     lines = ["\n\n# Активные задачи\n"]
     for t in tasks:
         ctx = (t.get("context") or "")[:TASK_CONTEXT_CAP]
         lines.append(f"\n## {t['title']}" + ("\n" + ctx if ctx else ""))
+    if total is not None and total > len(tasks):
+        lines.append(f"\n\n_(показаны {len(tasks)} из {total} активных задач — самые свежие)_")
     return "".join(lines)
 
 
@@ -342,18 +346,19 @@ def _render_projects_block(projects: list[dict]) -> str:
 
 
 def build_memory_blocks(
-    notes: list[dict], tasks: list[dict]
+    notes: list[dict], tasks: list[dict], tasks_total: int | None = None
 ) -> tuple[str | None, str | None]:
     """Строит (memory_block, tasks_block) под токен-бюджет MEMORY_TOKEN_BUDGET.
 
     Урезание при переполнении: (1) контент заметок → 100 симв; (2) выкидываем
-    заметки с конца (они отсортированы по релевантности/свежести). Задачи не
-    урезаем (но context каждой капится TASK_CONTEXT_CAP в рендере). Если обоих
-    нет — (None, None), пустые заголовки не добавляем."""
+    заметки с конца (они отсортированы по релевантности/свежести). Задачи приходят
+    уже капнутыми (MAX_INJECTED_TASKS) — context каждой капится TASK_CONTEXT_CAP, а
+    tasks_total (если > len) показывает, сколько всего активных. Если обоих нет —
+    (None, None), пустые заголовки не добавляем."""
     if not notes and not tasks:
         return None, None
 
-    tasks_block = _render_tasks_block(tasks) if tasks else None
+    tasks_block = _render_tasks_block(tasks, tasks_total) if tasks else None
     tasks_tokens = _estimate_tokens(tasks_block) if tasks_block else 0
     if not notes:
         return None, tasks_block
@@ -432,8 +437,10 @@ def prepare_context(
     memory_block = tasks_block = projects_block = None
     if inject_memory:
         notes = db.relevant_memory(user_message or "", limit=5)
-        active_tasks = db.list_tasks(status="active")
-        memory_block, tasks_block = build_memory_blocks(notes, active_tasks)
+        all_active = db.list_tasks(status="active")          # уже DESC по updated_at
+        active_tasks = all_active[:MAX_INJECTED_TASKS]       # кап: не вытесняем заметки
+        memory_block, tasks_block = build_memory_blocks(
+            notes, active_tasks, tasks_total=len(all_active))
         projects = db.list_projects(status="active")
         if projects:
             projects_block = _render_projects_block(projects)

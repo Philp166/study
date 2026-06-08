@@ -176,11 +176,12 @@ VOICE_MEMORY_AUTOSAVE_ON = """
 
 VOICE_MEMORY_AUTOSAVE_OFF = """
 ## Сохранение в память (голос, подтверждение голосом)
-Автосохранение выключено, а в голосе нет кнопок — подтверждаешь только голосом.
+Автосохранение выключено, в голосе нет кнопок — подтверждение голосом, и его обеспечивает система.
 Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить/закрыть задачу:
-1. НЕ вызывай инструменты сохранения сразу. Сначала коротко переспроси вслух: «Сохранить это в память?».
-2. Вызови нужный инструмент (save_memory / save_task / close_task) ТОЛЬКО если в следующей реплике пользователь подтвердил (например «да», «давай», «сохрани», «ага», «угу», «верно»). После сохранения скажи «Сохранил».
-3. Если пользователь отказался, передумал или сменил тему — ничего не сохраняй и инструменты не вызывай.
+1. Сразу вызови нужный инструмент (save_memory / save_task / close_task / create_project). Он НЕ сохранит сразу, а подготовит запись и попросит переспросить.
+2. Коротко переспроси вслух: «Сохранить это в память?».
+3. Если в следующей реплике пользователь подтвердил («да», «давай», «сохрани», «ага», «угу», «верно») — запись применится САМА, просто скажи «Сохранил». НЕ вызывай инструмент повторно.
+4. Если пользователь отказался, передумал или сменил тему — ничего не делай, подготовленная запись отменится сама.
 """
 
 
@@ -648,7 +649,16 @@ def _apply_suggestion(task, memory, project=None) -> dict:
     данные: дописываем в существующую заметку. Задачи close/update резолвятся по
     title→id, если id не передан. Поле `project` у task/memory привязывает запись к
     проекту по названию (создаёт проект, если его нет). saved["memory"]/["task"]/
-    ["project"] == True ⟺ данные реально сохранены; *_status поясняет как именно."""
+    ["project"] == True ⟺ данные реально сохранены; *_status поясняет как именно.
+
+    Атомарность: резолв id/проекта идёт ДО записи (ошибки валидации — без записей).
+    Каждая db-операция атомарна сама по себе (своя транзакция). Кросс-операционную
+    транзакцию сознательно не вводим: слоты project/task/memory семантически
+    независимы (проект не должен откатываться из-за сбоя отдельной заметки), а
+    единственная многошаговая запись внутри слота — заметка + опц. project_id —
+    при частичном сбое оставляет валидную заметку без опц. привязки (не потеря
+    данных). Полноценная общая транзакция потребовала бы протаскивания connection
+    через весь db-слой — несоразмерно для однопользовательского приложения."""
     saved = {"task": False, "task_status": None, "memory": False,
              "memory_status": None, "project": False, "project_status": None}
     # 0. Явный create_project (слот project).
@@ -1091,6 +1101,47 @@ def memory_page():
     return FileResponse(BASE_DIR / "memory.html")
 
 
+# Отложенные голосовые сохранения при autosave=OFF: в голосе нет кнопки, поэтому
+# подтверждение даётся устным «да» на СЛЕДУЮЩЕЙ реплике. Храним предложенную запись
+# на бэке (ключ — chat_id) до подтверждения. Эфемерно (живёт в процессе) — для
+# короткой голосовой сессии этого достаточно.
+_VOICE_PENDING: dict[str, dict] = {}
+
+_AFFIRMATIVE_RE = re.compile(
+    r"\b(да|ага|угу|угум|давай|давайте|сохрани|сохраните|запиши|запишите|верно|"
+    r"точно|именно|конечно|ок|окей|yes|сохраняй|подтверждаю|ладно|можно|"
+    r"согласен|согласна)\b",
+    re.IGNORECASE,
+)
+# Отрицание перекрывает согласие: при «не/нет/отмена/передумал» — НЕ подтверждение.
+# Цена ложного «да» — молчаливая запись против воли; цена ложного «нет» — переспрос.
+_NEGATION_RE = re.compile(
+    r"\b(не|нет|нету|неа|отмена|отмени|против|передумал|передумала)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_affirmative(text: str) -> bool:
+    """Грубый детектор устного согласия для голосового подтверждения. Отрицание имеет
+    приоритет: «да не надо», «конечно нет», «не сохраняй» → НЕ подтверждение."""
+    t = text or ""
+    if _NEGATION_RE.search(t):
+        return False
+    return bool(_AFFIRMATIVE_RE.search(t))
+
+
+def _resolve_voice_pending(chat_id, text) -> dict | None:
+    """Если для chat_id есть отложенная запись: применить её при устном «да», иначе
+    снять (пользователь не подтвердил/сменил тему). Возвращает saved-словарь, если
+    применили, иначе None."""
+    if not chat_id or chat_id not in _VOICE_PENDING:
+        return None
+    pend = _VOICE_PENDING.pop(chat_id)
+    if _is_affirmative(text):
+        return _apply_suggestion(pend.get("task"), pend.get("memory"), pend.get("project"))
+    return None
+
+
 @app.post("/voice/chat/stream")
 async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
@@ -1101,6 +1152,14 @@ async def voice_chat_stream(req: VoiceChatRequest):
     voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM + (
         VOICE_MEMORY_AUTOSAVE_ON if voice_autosave else VOICE_MEMORY_AUTOSAVE_OFF
     )
+    # Устное «да» применяет запись, отложенную на прошлой реплике (только при OFF).
+    # Если тумблер успели включить — снимаем устаревшее отложенное (иначе оно зависло
+    # бы и применилось позже на несвязанном «да»).
+    voice_pending_saved = None
+    if voice_autosave:
+        _VOICE_PENDING.pop(req.chat_id, None)
+    else:
+        voice_pending_saved = _resolve_voice_pending(req.chat_id, req.text)
 
     voice_user_id = None
     if req.chat_id:
@@ -1119,18 +1178,28 @@ async def voice_chat_stream(req: VoiceChatRequest):
         voice_system = voice_base
 
     async def generate():
+        # Сообщаем фронту о записи, применённой устным «да» в начале этой реплики.
+        if voice_pending_saved is not None:
+            yield f"data: {json.dumps({'type': 'memory_saved', 'saved': voice_pending_saved})}\n\n"
         text_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def voice_tool_handler(name, tool_input):
-            # Голос сохраняет НАПРЯМУЮ: карточки подтверждения нет, согласие даётся
-            # голосом (по промпту), поэтому к моменту вызова решение уже принято.
             if name == "search_memory":
                 return _format_search_results(db.search_memory((tool_input or {}).get("query") or ""))
             sug = build_suggestion(name, tool_input)
             if sug is None:
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
                         "инструмент — ничего не сохранил.")
+            if not voice_autosave:
+                # OFF: не пишем сразу — кладём в pending, применим по устному «да»
+                # на следующей реплике (бэкенд-подтверждение, тумблер реально работает).
+                if req.chat_id:
+                    _VOICE_PENDING[req.chat_id] = sug
+                    return ("Подготовил запись, но пока НЕ сохранил. Переспроси у пользователя "
+                            "вслух «Сохранить это в память?» — применю после устного «да».")
+                return ("Без активного чата не могу отложить подтверждение голосом — "
+                        "предложи сохранить в текстовом чате.")
             task, memory, project = sug.get("task"), sug.get("memory"), sug.get("project")
             saved = _apply_suggestion(task, memory, project)
             loop.call_soon_threadsafe(text_queue.put_nowait, ("memory_saved", saved))
