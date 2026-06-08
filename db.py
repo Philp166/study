@@ -1464,6 +1464,25 @@ def get_task(task_id: int) -> dict | None:
         return _fetchone(cur)
 
 
+def find_active_task_by_title(title: str) -> dict | None:
+    """Активная задача по нормализованному (trim+lower) title; свежайшая, если
+    совпало несколько (по updated_at, затем id — детерминированно). Нужно для
+    close/update по названию: агент видит задачи в срезе по title, но не знает их
+    id. LOWER кросс-СУБД (SQLite — юникод-функция). NB: при двух активных задачах с
+    одинаковым нормализованным title close затронет только свежайшую."""
+    norm = (title or "").strip().lower()
+    if not norm:
+        return None
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT * FROM tasks WHERE status='active' AND LOWER(TRIM(title))={_P} "
+            f"ORDER BY updated_at DESC, id DESC",
+            (norm,),
+        )
+        return _fetchone(cur)
+
+
 def create_task(title: str, context: str = "") -> dict:
     now = time.time()
     with _connect() as conn:

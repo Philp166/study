@@ -32,10 +32,9 @@ log = logging.getLogger("cos.branch")
 
 import anthropic
 
-from agent import Agent, MEMORY_TOOLS
+from agent import Agent, MEMORY_TOOLS, build_suggestion
 import db
 import summarizer
-import memory_classifier
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     raise SystemExit("Открой файл .env и вставь свой ключ в строку ANTHROPIC_API_KEY=")
@@ -167,21 +166,21 @@ VOICE_SYSTEM_ADDENDUM = """
 - Если тема требует развёрнутого ответа, предложи перейти в текстовый чат.
 """
 
-# Память в голосе: инструмент `remember` доступен (как в тексте), но карточки
-# подтверждения нет — подтверждение только голосом. Какой из блоков добавить к
-# системнику, решаем по настройке memory_autosave на каждый запрос.
+# Память в голосе: типизированные инструменты (save_memory/save_task/close_task)
+# доступны как в тексте, но карточки подтверждения нет — подтверждение только
+# голосом. Какой блок добавить к системнику, решаем по memory_autosave на запрос.
 VOICE_MEMORY_AUTOSAVE_ON = """
 ## Сохранение в память (голос, автосохранение ВКЛ)
-Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить задачу — сразу вызови инструмент `remember` (один вызов, суть своими словами со всеми деталями из контекста) и коротко подтверди вслух: «Сохранил». Не переспрашивай.
+Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить/закрыть задачу — сразу вызови нужный инструмент (save_memory / save_task / close_task), заполнив поля самостоятельно, и коротко подтверди вслух: «Сохранил». Не переспрашивай.
 """
 
 VOICE_MEMORY_AUTOSAVE_OFF = """
 ## Сохранение в память (голос, подтверждение голосом)
 Автосохранение выключено, а в голосе нет кнопок — подтверждаешь только голосом.
-Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить задачу:
-1. НЕ вызывай `remember` сразу. Сначала коротко переспроси вслух: «Сохранить это в память?».
-2. Вызови `remember` ТОЛЬКО если в следующей реплике пользователь подтвердил (например «да», «давай», «сохрани», «ага», «угу», «верно»). После сохранения скажи «Сохранил».
-3. Если пользователь отказался, передумал или сменил тему — ничего не сохраняй и `remember` не вызывай.
+Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить/закрыть задачу:
+1. НЕ вызывай инструменты сохранения сразу. Сначала коротко переспроси вслух: «Сохранить это в память?».
+2. Вызови нужный инструмент (save_memory / save_task / close_task) ТОЛЬКО если в следующей реплике пользователь подтвердил (например «да», «давай», «сохрани», «ага», «угу», «верно»). После сохранения скажи «Сохранил».
+3. Если пользователь отказался, передумал или сменил тему — ничего не сохраняй и инструменты не вызывай.
 """
 
 
@@ -543,30 +542,76 @@ def api_memory_folders():
     return db.get_memory_folders()
 
 
+def _resolve_task_id(title) -> int | None:
+    """id активной задачи по названию (агент close/update задаёт title, не id)."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    found = db.find_active_task_by_title(t)
+    return found["id"] if found else None
+
+
+def _tool_result_msg(saved: dict) -> str:
+    """Короткий честный итог для агента по результату _apply_suggestion."""
+    parts = []
+    mem_txt = {
+        "created": "сохранил заметку",
+        "merged": "дополнил существующую заметку",
+        "duplicate": "заметка уже была записана",
+        "updated": "обновил заметку",
+    }.get(saved.get("memory_status"))
+    if saved.get("memory") and mem_txt:
+        parts.append(mem_txt)
+    task_txt = {
+        "created": "создал задачу",
+        "updated": "обновил задачу",
+        "closed": "закрыл задачу",
+    }.get(saved.get("task_status"))
+    if saved.get("task") and task_txt:
+        parts.append(task_txt)
+    if parts:
+        return "Готово: " + ", ".join(parts) + "."
+    if saved.get("task_status") == "not_found":
+        return "Не нашёл активную задачу с таким названием — ничего не закрыл. Уточни название."
+    if saved.get("memory_status") == "title_exists":
+        return "Заметку не записал — заголовок уже занят другой заметкой."
+    return "Сохранять было нечего."
+
+
 def _apply_suggestion(task, memory) -> dict:
-    """Применяет предложение классификатора к БД. Используется и кнопкой
-    подтверждения (эндпоинт ниже), и словесным «да» (в стриме). При коллизии title
-    у memory.create НЕ теряем данные: дописываем в существующую заметку.
-    saved["memory"] == True ⟺ данные реально сохранены; memory_status поясняет как
-    именно (created | merged | duplicate | updated | title_exists)."""
-    saved = {"task": False, "memory": False, "memory_status": None}
+    """Применяет структурированное предложение (от типизированных инструментов агента
+    или кнопки подтверждения) к БД. При коллизии title у memory.create НЕ теряем
+    данные: дописываем в существующую заметку. Задачи close/update резолвятся по
+    title→id, если id не передан. saved["memory"]/["task"] == True ⟺ данные реально
+    сохранены; *_status поясняет как именно."""
+    saved = {"task": False, "task_status": None, "memory": False, "memory_status": None}
     if isinstance(task, dict):
         a = task.get("action")
         if a == "create" and (task.get("title") or "").strip():
             db.create_task(title=task["title"].strip(), context=task.get("context") or "")
             saved["task"] = True
-        elif a == "update" and task.get("id"):
+            saved["task_status"] = "created"
+        elif a == "update":
+            tid = task.get("id") or _resolve_task_id(task.get("title"))
             fields = {}
             if task.get("context") is not None:
                 fields["context"] = task["context"]
             if (task.get("title") or "").strip():
                 fields["title"] = task["title"].strip()
-            if fields:
-                db.update_task(task["id"], **fields)
-            saved["task"] = True
-        elif a == "close" and task.get("id"):
-            db.update_task(task["id"], status="completed", outcome=task.get("outcome") or "")
-            saved["task"] = True
+            if tid and fields:
+                db.update_task(tid, **fields)
+                saved["task"] = True
+                saved["task_status"] = "updated"
+            elif not tid:
+                saved["task_status"] = "not_found"
+        elif a == "close":
+            tid = task.get("id") or _resolve_task_id(task.get("title"))
+            if tid:
+                db.update_task(tid, status="completed", outcome=task.get("outcome") or "")
+                saved["task"] = True
+                saved["task_status"] = "closed"
+            else:
+                saved["task_status"] = "not_found"
     if isinstance(memory, dict):
         a = memory.get("action")
         if a == "create" and (memory.get("title") or "").strip():
@@ -724,9 +769,9 @@ def _stream_chat_response(chat_id: str, model: str,
     Контекст собирается по активной ветке (leaf = user_message_id). Ответ
     ассистента сохраняется с parent_message_id = user_message_id напрямую.
 
-    Память: агент сам решает, когда сохранить, и зовёт инструмент `remember`
-    (только по явной просьбе пользователя). Инструмент гоняет субагент-композер
-    (Haiku), который структурирует заметку/задачу. memory_autosave включён —
+    Память: агент сам структурирует и зовёт типизированные инструменты
+    save_memory/save_task/close_task (только по явной просьбе пользователя),
+    заполняя поля сам. memory_autosave включён —
     пишем сразу (event suggestion_applied), иначе показываем карточку
     подтверждения (event memory_suggestion). Память также инжектится в
     системпромпт для чтения.
@@ -740,29 +785,24 @@ def _stream_chat_response(chat_id: str, model: str,
     )
 
     def generate():
-        applied = []       # автосохранённые записи (тост)
-        suggestions = []   # отложенные на подтверждение (карточка)
+        applied = []                              # автосохранённые записи (тост)
+        pending = {"task": None, "memory": None}  # отложенное на подтверждение (одна карточка)
 
         def tool_handler(name, tool_input):
-            if name != "remember":
-                return "Неизвестный инструмент."
-            text = ((tool_input or {}).get("text") or "").strip()
-            if not text:
-                return "Пустой запрос — нечего сохранять."
-            recent = db.get_branch_history(chat_id, user_message_id)
-            existing = db.relevant_memory(text)
-            active = [
-                {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
-                for t in db.list_tasks(status="active")
-            ]
-            verdict = memory_classifier.compose_save(client, text, recent, existing, active)
-            task, memory = verdict.get("task"), verdict.get("memory")
-            if not task and not memory:
-                return "Не удалось выделить конкретику — ничего не сохранил. Уточни, что именно записать."
+            sug = build_suggestion(name, tool_input)
+            if sug is None:
+                return ("Не передал обязательные поля (как минимум title) или неизвестный "
+                        "инструмент — ничего не сохранил.")
+            task, memory = sug.get("task"), sug.get("memory")
             if db.get_setting("memory_autosave", "false") == "true":
-                applied.append(_apply_suggestion(task, memory))
-                return "Сохранено в память."
-            suggestions.append({"task": task, "memory": memory})
+                saved = _apply_suggestion(task, memory)
+                applied.append(saved)
+                return _tool_result_msg(saved)
+            # autosave off: копим все вызовы за ход в одну карточку подтверждения
+            if task:
+                pending["task"] = task
+            if memory:
+                pending["memory"] = memory
             return "Подготовил запись и показал пользователю карточку подтверждения."
 
         full_text = ""
@@ -794,9 +834,8 @@ def _stream_chat_response(chat_id: str, model: str,
 
             for saved in applied:
                 yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
-            if suggestions:
-                last = suggestions[-1]
-                yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': last['task'], 'memory': last['memory']})}\n\n"
+            if pending["task"] or pending["memory"]:
+                yield f"data: {json.dumps({'type': 'memory_suggestion', 'task': pending['task'], 'memory': pending['memory']})}\n\n"
 
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
         except Exception as e:
@@ -903,9 +942,9 @@ def memory_page():
 @app.post("/voice/chat/stream")
 async def voice_chat_stream(req: VoiceChatRequest):
     from agent import SYSTEM_PROMPT
-    # Голос умеет писать в память тем же инструментом `remember`. Поведение зависит
-    # от memory_autosave: ВКЛ — пишем сразу и говорим «сохранил»; ВЫКЛ — сначала
-    # переспрашиваем голосом и сохраняем только после устного «да».
+    # Голос пишет в память теми же типизированными инструментами, что и текст.
+    # Поведение зависит от memory_autosave: ВКЛ — пишем сразу и говорим «сохранил»;
+    # ВЫКЛ — сначала переспрашиваем голосом и сохраняем только после устного «да».
     voice_autosave = db.get_setting("memory_autosave", "false") == "true"
     voice_base = SYSTEM_PROMPT + VOICE_SYSTEM_ADDENDUM + (
         VOICE_MEMORY_AUTOSAVE_ON if voice_autosave else VOICE_MEMORY_AUTOSAVE_OFF
@@ -934,24 +973,14 @@ async def voice_chat_stream(req: VoiceChatRequest):
         def voice_tool_handler(name, tool_input):
             # Голос сохраняет НАПРЯМУЮ: карточки подтверждения нет, согласие даётся
             # голосом (по промпту), поэтому к моменту вызова решение уже принято.
-            if name != "remember":
-                return "Неизвестный инструмент."
-            text = ((tool_input or {}).get("text") or "").strip()
-            if not text:
-                return "Пустой запрос — нечего сохранять."
-            recent = db.get_branch_history(req.chat_id, voice_user_id) if req.chat_id else messages
-            existing = db.relevant_memory(text)
-            active = [
-                {"id": t["id"], "title": t["title"], "context_preview": (t.get("context") or "")[:500]}
-                for t in db.list_tasks(status="active")
-            ]
-            verdict = memory_classifier.compose_save(client, text, recent, existing, active)
-            task, memory = verdict.get("task"), verdict.get("memory")
-            if not task and not memory:
-                return "Не удалось выделить конкретику — ничего не сохранил. Уточни, что именно записать."
+            sug = build_suggestion(name, tool_input)
+            if sug is None:
+                return ("Не передал обязательные поля (как минимум title) или неизвестный "
+                        "инструмент — ничего не сохранил.")
+            task, memory = sug.get("task"), sug.get("memory")
             saved = _apply_suggestion(task, memory)
             loop.call_soon_threadsafe(text_queue.put_nowait, ("memory_saved", saved))
-            return "Сохранено в память."
+            return _tool_result_msg(saved)
 
         def run_claude():
             try:

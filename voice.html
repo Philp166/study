@@ -188,14 +188,20 @@
         duplicate: "заметка уже была записана",
         updated: "заметка обновлена",
       }[saved.memory_status];
+      const taskMsg = {
+        created: "задача создана",
+        updated: "задача обновлена",
+        closed: "задача закрыта",
+      }[saved.task_status];
       const parts = [];
-      if (saved.task) parts.push("задача сохранена");
+      if (saved.task && taskMsg) parts.push(taskMsg);
       if (saved.memory && memMsg) parts.push(memMsg);
       if (parts.length) {
         let msg = "✓ " + parts.join(", ");
         if (saved.memory_status === "title_exists") msg += " (заметку не записал — заголовок занят)";
         return msg;
       }
+      if (saved.task_status === "not_found") return "⚠ Не нашёл задачу с таким названием";
       return saved.memory_status === "title_exists"
         ? "⚠ Заметка с таким заголовком уже есть — не записал"
         : "⚠ Нечего было сохранять";
