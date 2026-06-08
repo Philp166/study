@@ -259,6 +259,7 @@ class StreamRequest(BaseModel):
 class VoiceChatRequest(BaseModel):
     text: str
     chat_id: str | None = None
+    model: str | None = None
     messages: list[Message] = []
 
 
@@ -1042,12 +1043,16 @@ async def voice_chat_stream(req: VoiceChatRequest):
     else:
         voice_pending_saved = _resolve_voice_pending(req.chat_id, req.text)
 
+    # Модель выбирается на фронте; Haiku — дефолт (низкая задержка, и покрывает
+    # путь wakeword-активации до того, как фронт подставит сохранённый выбор).
+    voice_model = req.model if req.model in ALLOWED_MODELS else VOICE_MODEL
+
     voice_user_id = None
     if req.chat_id:
         voice_user_id = db.add_message(req.chat_id, "user", req.text)
 
         voice_system, messages = summarizer.prepare_context(
-            client, VOICE_MODEL, req.chat_id,
+            client, voice_model, req.chat_id,
             voice_base,
             voice_user_id,
             user_message=req.text,
@@ -1089,7 +1094,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
             try:
                 for chunk in cos_agent.respond_stream(
                     messages,
-                    model=VOICE_MODEL,
+                    model=voice_model,
                     max_tokens=VOICE_MAX_TOKENS,
                     system_prompt=voice_system,
                     tools=MEMORY_TOOLS,
@@ -1138,14 +1143,14 @@ async def voice_chat_stream(req: VoiceChatRequest):
                                    parent_message_id=voice_user_id)
                     u = cos_agent.token_stats.last_usage
                     db.save_usage(
-                        req.chat_id, VOICE_MODEL,
+                        req.chat_id, voice_model,
                         u.input_tokens, u.output_tokens,
                         u.cache_creation_input_tokens, u.cache_read_input_tokens,
                     )
                 usage_data = {
                     "type": "usage",
                     **cos_agent.token_stats.to_dict(),
-                    "context": cos_agent.get_context_pressure(VOICE_MODEL),
+                    "context": cos_agent.get_context_pressure(voice_model),
                     "chat_totals": db.get_chat_usage(req.chat_id) if req.chat_id else None,
                 }
                 yield f"data: {json.dumps(usage_data)}\n\n"

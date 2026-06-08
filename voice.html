@@ -39,6 +39,10 @@
   <div id="transcript"></div>
 
   <div class="controls" id="controls">
+    <div class="voice-model-row">
+      <span>Модель</span>
+      <select id="voice-model-select" class="voice-model-select" aria-label="Модель"></select>
+    </div>
     <div class="holo-container" id="holo-face"></div>
     <div id="status">Нажми, чтобы начать разговор</div>
     <div id="live-text"></div>
@@ -99,6 +103,28 @@
     const liveTextEl = document.getElementById("live-text");
     const hintEl = document.getElementById("hint");
 
+    const VOICE_MODELS = [
+      { id: "claude-opus-4-7",   label: "Opus 4.7" },
+      { id: "claude-opus-4-6",   label: "Opus 4.6" },
+      { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+      { id: "claude-haiku-4-5",  label: "Haiku 4.5" },
+    ];
+    const VOICE_DEFAULT_MODEL = "claude-haiku-4-5";
+    let voiceModel = VOICE_DEFAULT_MODEL;
+
+    const modelSelectEl = document.getElementById("voice-model-select");
+    for (const m of VOICE_MODELS) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      modelSelectEl.appendChild(opt);
+    }
+    modelSelectEl.value = voiceModel;
+    modelSelectEl.addEventListener("change", () => {
+      voiceModel = modelSelectEl.value;
+      if (chatId) apiCall("PATCH", `/api/chats/${chatId}`, { model: voiceModel });
+    });
+
     let chatId = null;
     let messages = [];
     let recognition = null;
@@ -131,11 +157,16 @@
       if (existing) {
         chatId = existing.id;
       } else {
-        const { id } = await apiCall("POST", "/api/chats", { title: VOICE_CHAT_TITLE, model: "claude-haiku-4-5" });
+        const { id } = await apiCall("POST", "/api/chats", { title: VOICE_CHAT_TITLE, model: voiceModel });
         chatId = id;
       }
       const data = await apiCall("GET", `/api/chats/${chatId}`);
       messages = data.messages || [];
+      // Восстанавливаем выбранную ранее модель из голосового чата.
+      if (data.model && VOICE_MODELS.some(m => m.id === data.model)) {
+        voiceModel = data.model;
+        modelSelectEl.value = voiceModel;
+      }
     }
 
     async function migrateVoiceLocalStorage() {
@@ -229,6 +260,7 @@
       const textInput = document.getElementById("voice-text-input");
       if (sendBtn) sendBtn.disabled = false;
       if (textInput) textInput.disabled = false;
+      modelSelectEl.disabled = false;
 
       switch (state) {
         case "idle":
@@ -247,6 +279,7 @@
           micBtn.disabled = true;
           if (sendBtn) sendBtn.disabled = true;
           if (textInput) textInput.disabled = true;
+          modelSelectEl.disabled = true;
           setHoloState("thinking");
           break;
         case "speaking":
@@ -254,6 +287,7 @@
           micBtn.disabled = true;
           if (sendBtn) sendBtn.disabled = true;
           if (textInput) textInput.disabled = true;
+          modelSelectEl.disabled = true;
           setHoloState("speaking");
           break;
         case "error":
@@ -488,7 +522,7 @@
         const resp = await fetch("/voice/chat/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: userText, chat_id: chatId }),
+          body: JSON.stringify({ text: userText, chat_id: chatId, model: voiceModel }),
         });
 
         const reader = resp.body.getReader();
