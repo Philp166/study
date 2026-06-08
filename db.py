@@ -317,6 +317,22 @@ def _column_exists(conn, table: str, col: str) -> bool:
         return any(r[1] == col for r in cur.fetchall())
 
 
+def _table_exists(conn, table: str) -> bool:
+    if _PG:
+        cur = _execute(
+            conn,
+            f"SELECT 1 FROM information_schema.tables "
+            f"WHERE table_schema = current_schema() AND table_name={_P}",
+            (table,),
+        )
+        return _fetchone(cur) is not None
+    else:
+        cur = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        )
+        return cur.fetchone() is not None
+
+
 def _migrate(conn):
     """Идемпотентно приводит схему к дереву и переносит легаси-данные."""
     int_type = "INTEGER" if not _PG else "INTEGER"
@@ -411,6 +427,10 @@ def _migrate(conn):
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_ltm_status ON long_term_memory(status)")
         conn.commit()
 
+    # 9. Память v2 Этап 2: проекты-контейнеры + материализованный граф связей.
+    _migrate_projects_and_links(conn)
+    conn.commit()
+
 
 def _rebuild_summaries(conn):
     real = "DOUBLE PRECISION" if _PG else "REAL"
@@ -498,6 +518,69 @@ def _migrate_ltm_folder(conn):
         )
         _execute(conn, "DROP TABLE long_term_memory")
         _execute(conn, "ALTER TABLE long_term_memory_new RENAME TO long_term_memory")
+
+
+def _migrate_projects_and_links(conn):
+    """Идемпотентно (Этап 2): таблица projects (контейнер-сущность), FK project_id
+    на заметках/задачах (NULL, ON DELETE SET NULL), таблица memory_links
+    (материализованный граф [[..]], UNIQUE(source_id,target_title) для upsert).
+    При ПЕРВОМ создании memory_links — одноразовый бэкфилл из существующих заметок.
+    Кросс-СУБД; следует идиому ADD COLUMN ... REFERENCES (как parent_message_id)."""
+    real = "DOUBLE PRECISION" if _PG else "REAL"
+    pk = "SERIAL PRIMARY KEY" if _PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    # Коммитим по блокам (как шаги 1-8): на Postgres ошибка в середине иначе
+    # отравила бы всю транзакцию миграции; на SQLite — безвредно.
+    _execute(
+        conn,
+        f"CREATE TABLE IF NOT EXISTS projects ("
+        f"  id {pk},"
+        f"  title TEXT NOT NULL UNIQUE,"
+        f"  description TEXT NOT NULL DEFAULT '',"
+        f"  status TEXT NOT NULL DEFAULT 'active',"
+        f"  created_at {real} NOT NULL,"
+        f"  updated_at {real} NOT NULL)",
+    )
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)")
+    conn.commit()
+
+    if not _column_exists(conn, "long_term_memory", "project_id"):
+        _execute(
+            conn,
+            "ALTER TABLE long_term_memory ADD COLUMN project_id INTEGER "
+            "REFERENCES projects(id) ON DELETE SET NULL",
+        )
+    if not _column_exists(conn, "tasks", "project_id"):
+        _execute(
+            conn,
+            "ALTER TABLE tasks ADD COLUMN project_id INTEGER "
+            "REFERENCES projects(id) ON DELETE SET NULL",
+        )
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_ltm_project ON long_term_memory(project_id)")
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)")
+    conn.commit()
+
+    links_existed = _table_exists(conn, "memory_links")
+    _execute(
+        conn,
+        f"CREATE TABLE IF NOT EXISTS memory_links ("
+        f"  id {pk},"
+        f"  source_id INTEGER NOT NULL REFERENCES long_term_memory(id) ON DELETE CASCADE,"
+        f"  target_id INTEGER REFERENCES long_term_memory(id) ON DELETE SET NULL,"
+        f"  target_title TEXT NOT NULL,"
+        f"  UNIQUE(source_id, target_title))",
+    )
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_memlinks_source ON memory_links(source_id)")
+    _execute(conn, "CREATE INDEX IF NOT EXISTS idx_memlinks_target ON memory_links(target_id)")
+    conn.commit()
+
+    if not links_existed:
+        # одноразовый бэкфилл графа из существующих active-заметок
+        cur = _execute(conn, "SELECT id, content FROM long_term_memory WHERE status='active'")
+        for r in _fetchall(cur):
+            _upsert_links_for_note(conn, r["id"], r["content"] or "")
+        _resolve_all_link_targets(conn)
+        conn.commit()
 
 
 def init_db():
@@ -1266,9 +1349,70 @@ def get_memory(memory_id: int) -> dict | None:
         return _fetchone(cur)
 
 
+# ── Материализованный граф связей [[..]] (memory_links) ──
+
+def _parse_wikilink_titles(content: str) -> list[str]:
+    """Уникальные (по нормализованному виду) target-заголовки из [[..]] в content,
+    в порядке появления; [[Заголовок|алиас]] → Заголовок."""
+    out, seen = [], set()
+    for raw in _WIKILINK_RE.findall(content or ""):
+        t = raw.split("|")[0].strip()
+        k = t.lower()
+        if t and k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
+
+
+def _upsert_links_for_note(conn, source_id: int, content: str) -> None:
+    """UPSERT исходящих связей заметки + удаление исчезнувших (в рамках conn, без
+    commit). target_id здесь не резолвится — это делает _resolve_all_link_targets."""
+    titles = _parse_wikilink_titles(content)
+    for t in titles:
+        _execute(
+            conn,
+            f"INSERT INTO memory_links (source_id, target_id, target_title) "
+            f"VALUES ({_P}, NULL, {_P}) "
+            f"ON CONFLICT (source_id, target_title) DO NOTHING",
+            (source_id, t),
+        )
+    if titles:
+        ph = ",".join([_P] * len(titles))
+        _execute(
+            conn,
+            f"DELETE FROM memory_links WHERE source_id={_P} AND target_title NOT IN ({ph})",
+            (source_id, *titles),
+        )
+    else:
+        _execute(conn, f"DELETE FROM memory_links WHERE source_id={_P}", (source_id,))
+
+
+def _resolve_all_link_targets(conn) -> None:
+    """Пересчитывает target_id всех связей по нормализованному (trim+lower) title
+    активных заметок. Покрывает бэклинки (появилась целевая заметка) и
+    переименование (target съезжает/становится ghost)."""
+    cur = _execute(conn, "SELECT id, title FROM long_term_memory WHERE status='active'")
+    norm_to_id = {(r["title"] or "").strip().lower(): r["id"] for r in _fetchall(cur)}
+    cur = _execute(conn, "SELECT id, target_title FROM memory_links")
+    for r in _fetchall(cur):
+        tid = norm_to_id.get((r["target_title"] or "").strip().lower())
+        _execute(conn, f"UPDATE memory_links SET target_id={_P} WHERE id={_P}", (tid, r["id"]))
+
+
+def sync_memory_links(source_id: int, content: str) -> None:
+    """Материализует граф после записи заметки source_id: upsert её исходящих
+    [[..]], удаление исчезнувших и глобальный ре-резолв target_id (бэклинки +
+    переименование). Свой connection + commit."""
+    with _connect() as conn:
+        _upsert_links_for_note(conn, source_id, content or "")
+        _resolve_all_link_targets(conn)
+        conn.commit()
+
+
 def create_memory(title: str, content: str = "", folder: str | None = None) -> dict | None:
     """Создаёт заметку. Если active-заметка с таким title уже есть → None (=409).
-    Проверка и вставка в одной транзакции (защита от гонки). folder=None → без папки."""
+    Проверка и вставка в одной транзакции (защита от гонки). folder=None → без папки.
+    После создания материализует граф связей (исходящие [[..]] + бэклинки на неё)."""
     now = time.time()
     with _connect() as conn:
         cur = _execute(
@@ -1291,12 +1435,15 @@ def create_memory(title: str, content: str = "", folder: str | None = None) -> d
             f"SELECT {_MEMORY_COLS} FROM long_term_memory WHERE id={_P}",
             (new_id,),
         )
-        return _fetchone(cur)
+        row = _fetchone(cur)
+    sync_memory_links(new_id, content or "")
+    return row
 
 
 def update_memory(memory_id: int, **fields) -> dict | None:
     """Whitelist {title, content, folder, status}. Всегда обновляет updated_at.
-    Возвращает обновлённую запись или None, если id не найден."""
+    Возвращает обновлённую запись или None, если id не найден. Любое изменение
+    (в т.ч. title/status) ре-материализует граф связей."""
     sets = []
     vals = []
     for k, v in fields.items():
@@ -1316,7 +1463,10 @@ def update_memory(memory_id: int, **fields) -> dict | None:
             vals,
         )
         conn.commit()
-    return get_memory(memory_id)
+    row = get_memory(memory_id)
+    if row is not None:
+        sync_memory_links(memory_id, row.get("content") or "")
+    return row
 
 
 def merge_memory_content(title: str, content: str) -> tuple[dict | None, str]:
@@ -1353,28 +1503,27 @@ def delete_memory(memory_id: int):
 
 
 def get_memory_links() -> list[dict]:
-    """Пары wiki-связей по всем active-заметкам: парсит [[...]] из content,
-    резолвит target по точному title. target_id=None, если заметка не найдена."""
+    """Пары wiki-связей из материализованной таблицы memory_links (а не парсингом
+    текста). Только связи активных source-заметок; target_id показываем лишь когда
+    целевая заметка тоже активна (иначе ghost: target_id=None). Форма прежняя:
+    {source_id, source_title, target_title, target_id}."""
     with _connect() as conn:
         cur = _execute(
             conn,
-            "SELECT id, title, content FROM long_term_memory WHERE status='active'",
+            "SELECT ml.source_id AS source_id, s.title AS source_title, "
+            "       ml.target_title AS target_title, "
+            "       CASE WHEN t.status='active' THEN ml.target_id ELSE NULL END AS target_id "
+            "FROM memory_links ml "
+            "JOIN long_term_memory s ON s.id = ml.source_id "
+            "LEFT JOIN long_term_memory t ON t.id = ml.target_id "
+            "WHERE s.status='active' "
+            "ORDER BY ml.source_id, ml.id",
         )
-        notes = _fetchall(cur)
-    title_to_id = {n["title"]: n["id"] for n in notes}
-    links: list[dict] = []
-    for n in notes:
-        for raw in _WIKILINK_RE.findall(n["content"] or ""):
-            target_title = raw.split("|")[0].strip()  # [[Заголовок|алиас]] → Заголовок
-            if not target_title:
-                continue
-            links.append({
-                "source_id": n["id"],
-                "source_title": n["title"],
-                "target_title": target_title,
-                "target_id": title_to_id.get(target_title),
-            })
-    return links
+        return [
+            {"source_id": r["source_id"], "source_title": r["source_title"],
+             "target_title": r["target_title"], "target_id": r["target_id"]}
+            for r in _fetchall(cur)
+        ]
 
 
 def get_memory_folders() -> list[str]:
@@ -1387,6 +1536,89 @@ def get_memory_folders() -> list[str]:
             "WHERE status='active' AND folder IS NOT NULL ORDER BY folder",
         )
         return [r["folder"] for r in _fetchall(cur)]
+
+
+# ── Проекты (projects) — контейнер-сущность для заметок и задач (Этап 2) ──
+
+_PROJECT_COLS = "id, title, description, status, created_at, updated_at"
+_PROJECT_FIELDS = {"title", "description", "status"}
+
+
+def list_projects(status: str = "active") -> list[dict]:
+    """Проекты (по умолчанию активные), свежие сверху. status='' → все."""
+    with _connect() as conn:
+        if status:
+            cur = _execute(
+                conn,
+                f"SELECT {_PROJECT_COLS} FROM projects WHERE status={_P} ORDER BY updated_at DESC",
+                (status,),
+            )
+        else:
+            cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects ORDER BY updated_at DESC")
+        return _fetchall(cur)
+
+
+def get_project(project_id: int) -> dict | None:
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects WHERE id={_P}", (project_id,))
+        return _fetchone(cur)
+
+
+def get_project_by_title(title: str) -> dict | None:
+    """Проект по нормализованному (trim+lower) title, любого статуса. Нужно агенту,
+    чтобы привязать заметку/задачу к существующему проекту по названию."""
+    norm = (title or "").strip().lower()
+    if not norm:
+        return None
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_PROJECT_COLS} FROM projects WHERE LOWER(TRIM(title))={_P} "
+            f"ORDER BY id LIMIT 1",
+            (norm,),
+        )
+        return _fetchone(cur)
+
+
+def create_project(title: str, description: str = "") -> dict | None:
+    """Создаёт проект. Если проект с таким (точным) title уже есть → None (=409),
+    как у заметок. Проверка+вставка в одной транзакции."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    now = time.time()
+    with _connect() as conn:
+        cur = _execute(conn, f"SELECT id FROM projects WHERE title={_P}", (t,))
+        if _fetchone(cur):
+            return None
+        new_id = _insert_returning_id(
+            conn,
+            f"INSERT INTO projects (title, description, status, created_at, updated_at) "
+            f"VALUES ({_P},{_P},'active',{_P},{_P})",
+            (t, description or "", now, now),
+        )
+        conn.commit()
+        cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects WHERE id={_P}", (new_id,))
+        return _fetchone(cur)
+
+
+def update_project(project_id: int, **fields) -> dict | None:
+    """Whitelist {title, description, status}. Обновляет updated_at. None если id нет."""
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k not in _PROJECT_FIELDS:
+            continue
+        sets.append(f"{k}={_P}")
+        vals.append(v)
+    if not sets:
+        return get_project(project_id)
+    sets.append(f"updated_at={_P}")
+    vals.append(time.time())
+    vals.append(project_id)
+    with _connect() as conn:
+        _execute(conn, f"UPDATE projects SET {', '.join(sets)} WHERE id={_P}", vals)
+        conn.commit()
+    return get_project(project_id)
 
 
 # Частотные служебные слова: при пороге ≥3 они иначе матчат %LIKE% почти всё и

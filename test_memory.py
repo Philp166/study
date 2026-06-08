@@ -15,6 +15,7 @@ import os
 # Ставим заглушки ДО импорта app: dummy-ключ (клиент не ходит в сеть при создании
 # объекта) и временный COS_DB_PATH (реальная per-тест БД всё равно подменяется
 # фикстурой fresh_db через monkeypatch db.DB_PATH). Локально БД — SQLite.
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -251,3 +252,118 @@ def test_tool_result_msg_honest():
     assert app._tool_result_msg(
         {"task": False, "task_status": None, "memory": True, "memory_status": "merged"}
     ).startswith("Готово")
+
+
+# ── Этап 2a: миграции (projects, memory_links, project_id) ──
+
+def test_migration_creates_tables_and_columns(fresh_db):
+    with sqlite3.connect(str(fresh_db)) as raw:
+        tables = {r[0] for r in raw.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert {"projects", "memory_links"} <= tables
+        ltm_cols = {r[1] for r in raw.execute("PRAGMA table_info(long_term_memory)").fetchall()}
+        task_cols = {r[1] for r in raw.execute("PRAGMA table_info(tasks)").fetchall()}
+        assert "project_id" in ltm_cols and "project_id" in task_cols
+
+
+def test_migration_idempotent(fresh_db):
+    p = db.create_project(title="Компьютер")
+    db.init_db()  # повторный прогон не должен ломать данные/схему
+    assert db.get_project(p["id"])["title"] == "Компьютер"
+
+
+# ── Этап 2a: projects CRUD ──
+
+def test_project_create_unique_and_lookup(fresh_db):
+    p = db.create_project(title="Офис", description="переезд")
+    assert p["title"] == "Офис" and p["status"] == "active"
+    assert db.create_project(title="Офис") is None        # точный дубль title → None
+    assert db.get_project_by_title("  офис ")["id"] == p["id"]   # резолв нормализованный
+    assert db.create_project(title="   ") is None          # пустой title → None
+    assert [pr["id"] for pr in db.list_projects()] == [p["id"]]
+
+
+def test_project_update(fresh_db):
+    p = db.create_project(title="Офис")
+    db.update_project(p["id"], status="archived")
+    assert db.list_projects() == []                        # active по умолчанию
+    assert db.get_project(p["id"])["status"] == "archived"
+
+
+# ── Этап 2a: материализованный граф memory_links ──
+
+def test_links_ghost_then_backlink_resolves(fresh_db):
+    a = db.create_memory(title="Алёна", content="коллега из [[Проект Икс]]")
+    links = db.get_memory_links()
+    assert len(links) == 1
+    assert links[0]["source_id"] == a["id"]
+    assert links[0]["target_title"] == "Проект Икс"
+    assert links[0]["target_id"] is None                  # ghost: целевой заметки ещё нет
+    # появилась целевая заметка → бэклинк резолвится
+    x = db.create_memory(title="Проект Икс", content="описание")
+    links = db.get_memory_links()
+    link = [l for l in links if l["source_id"] == a["id"]][0]
+    assert link["target_id"] == x["id"]
+
+
+def test_links_pruned_on_content_change(fresh_db):
+    a = db.create_memory(title="A", content="[[Б]] и [[В]]")
+    assert len(db.get_memory_links()) == 2
+    db.update_memory(a["id"], content="только [[Б]]")
+    links = db.get_memory_links()
+    assert [l["target_title"] for l in links] == ["Б"]
+
+
+def test_links_reresolve_on_rename(fresh_db):
+    a = db.create_memory(title="A", content="см. [[Сервер]]")
+    s = db.create_memory(title="Сервер", content="prod")
+    assert [l for l in db.get_memory_links() if l["source_id"] == a["id"]][0]["target_id"] == s["id"]
+    # переименование цели → связь A снова ghost
+    db.update_memory(s["id"], title="Сервер 2")
+    link = [l for l in db.get_memory_links() if l["source_id"] == a["id"]][0]
+    assert link["target_id"] is None
+
+
+def test_links_ghost_when_target_soft_deleted(fresh_db):
+    a = db.create_memory(title="A", content="[[Б]]")
+    b = db.create_memory(title="Б", content="x")
+    assert [l for l in db.get_memory_links() if l["source_id"] == a["id"]][0]["target_id"] == b["id"]
+    db.update_memory(b["id"], status="inactive")          # мягкое удаление
+    link = [l for l in db.get_memory_links() if l["source_id"] == a["id"]][0]
+    assert link["target_id"] is None                      # target неактивен → ghost
+
+
+def test_links_source_inactive_hidden(fresh_db):
+    a = db.create_memory(title="A", content="[[Б]]")
+    db.update_memory(a["id"], status="inactive")
+    assert db.get_memory_links() == []                    # source неактивен → связь не показываем
+
+
+def test_links_hard_delete_cascades(fresh_db):
+    a = db.create_memory(title="A", content="[[Б]]")
+    db.create_memory(title="Б", content="x")
+    assert len(db.get_memory_links()) == 1
+    db.delete_memory(a["id"])                              # FK ON DELETE CASCADE
+    assert db.get_memory_links() == []
+
+
+def test_links_backfill_from_existing_notes(tmp_path, monkeypatch):
+    """memory_links отсутствовала → миграция создаёт её и бэкфиллит из заметок."""
+    dbfile = tmp_path / "bf.db"
+    raw = sqlite3.connect(str(dbfile))
+    raw.executescript(db._SCHEMA_SQLITE)   # старые таблицы, без memory_links/projects
+    for title, content in [("Алёна", "коллега [[Проект Икс]]"), ("Проект Икс", "описание")]:
+        raw.execute(
+            "INSERT INTO long_term_memory (title,content,folder,status,created_at,updated_at) "
+            "VALUES (?,?,NULL,'active',1.0,1.0)", (title, content))
+    raw.commit()
+    raw.close()
+
+    monkeypatch.setattr(db, "DB_PATH", dbfile)
+    db.init_db()                            # миграция: создаёт memory_links + бэкфилл
+
+    links = db.get_memory_links()
+    assert len(links) == 1
+    assert links[0]["source_title"] == "Алёна"
+    assert links[0]["target_title"] == "Проект Икс"
+    assert links[0]["target_id"] is not None    # бэкфилл + резолв связал target
