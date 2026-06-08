@@ -1319,6 +1319,32 @@ def update_memory(memory_id: int, **fields) -> dict | None:
     return get_memory(memory_id)
 
 
+def merge_memory_content(title: str, content: str) -> tuple[dict | None, str]:
+    """Дописывает content в уже существующую active-заметку с таким title.
+    Нужно при коллизии create (title занят): вместо тихой потери данных дополняем
+    существующую заметку. Резолв по точному title, как в create_memory.
+    Возвращает (заметка|None, status):
+      'merged'    — content дописан в существующую заметку (заметка обновлена);
+      'duplicate' — дописывать было нечего (content пуст или уже содержится), не меняли;
+      'absent'    — active-заметки с таким title нет (заметка=None)."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_MEMORY_COLS} FROM long_term_memory "
+            f"WHERE status='active' AND title={_P}",
+            (title,),
+        )
+        existing = _fetchone(cur)
+    if existing is None:
+        return None, "absent"
+    new = (content or "").strip()
+    old = existing.get("content") or ""
+    if not new or new in old:
+        return existing, "duplicate"
+    merged = (old.rstrip() + "\n\n" + new).strip()
+    return update_memory(existing["id"], content=merged), "merged"
+
+
 def delete_memory(memory_id: int):
     """Физическое удаление (для крайних случаев; основной способ — status=inactive)."""
     with _connect() as conn:
@@ -1363,36 +1389,49 @@ def get_memory_folders() -> list[str]:
         return [r["folder"] for r in _fetchall(cur)]
 
 
+# Частотные служебные слова: при пороге ≥3 они иначе матчат %LIKE% почти всё и
+# тянут слабо-связанные заметки в дедуп/инжект (шум, против которого Этап 0).
+# Порог ≥3 нужен ради имён/аббревиатур (API, СЕО), а не ради «что/как/для».
+_STOPWORDS = frozenset({
+    # ru
+    "что", "как", "так", "это", "эта", "эти", "тот", "том", "вот", "там", "тут",
+    "где", "кто", "чем", "для", "под", "над", "при", "без", "про", "его", "её",
+    "ее", "они", "она", "оно", "мне", "нам", "вам", "был", "уже", "ещё", "еще",
+    "или", "была", "было", "этот", "того", "тоже", "есть", "надо", "чтобы",
+    "когда", "потом", "очень", "если",
+    # en
+    "the", "and", "for", "you", "are", "was", "not", "but", "has", "had", "can",
+    "all", "any", "our", "its", "his", "her", "who", "why", "how", "what", "this",
+    "that", "with", "from",
+})
+
+
 def relevant_memory(text: str, limit: int = 5) -> list[dict]:
-    """Релевантные активные заметки для классификатора памяти: поиск по ключевым
-    словам сообщения (OR LIKE по title/content). Если совпадений нет — последние
-    обновлённые. Возвращает [{id, title, content_preview}]."""
-    words = [w for w in re.findall(r"\w+", (text or "").lower()) if len(w) >= 4]
+    """Релевантные активные заметки: поиск по ключевым словам сообщения
+    (OR LIKE по title/content), сортировка по свежести. Если ни одно слово не
+    совпало — возвращает [] и НЕ подставляет «последние свежие»: ложные совпадения
+    засоряли бы дедуп при записи и инжект при чтении (канал бага B). Возвращает
+    [{id, title, content_preview, folder}]."""
+    words = [w for w in re.findall(r"\w+", (text or "").lower())
+             if len(w) >= 3 and w not in _STOPWORDS]
     words = list(dict.fromkeys(words))[:8]  # уникальные, не больше 8
     lim = max(1, int(limit))
+    if not words:
+        return []
     with _connect() as conn:
-        rows = []
-        if words:
-            clauses, params = [], []
-            for w in words:
-                like = f"%{w}%"
-                clauses.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
-                params.extend([like, like])
-            cur = _execute(
-                conn,
-                f"SELECT id, title, content, folder FROM long_term_memory "
-                f"WHERE status='active' AND ({' OR '.join(clauses)}) "
-                f"ORDER BY updated_at DESC LIMIT {lim}",
-                params,
-            )
-            rows = _fetchall(cur)
-        if not rows:
-            cur = _execute(
-                conn,
-                f"SELECT id, title, content, folder FROM long_term_memory "
-                f"WHERE status='active' ORDER BY updated_at DESC LIMIT {lim}",
-            )
-            rows = _fetchall(cur)
+        clauses, params = [], []
+        for w in words:
+            like = f"%{w}%"
+            clauses.append(f"(LOWER(title) LIKE {_P} OR LOWER(content) LIKE {_P})")
+            params.extend([like, like])
+        cur = _execute(
+            conn,
+            f"SELECT id, title, content, folder FROM long_term_memory "
+            f"WHERE status='active' AND ({' OR '.join(clauses)}) "
+            f"ORDER BY updated_at DESC LIMIT {lim}",
+            params,
+        )
+        rows = _fetchall(cur)
     return [
         {"id": r["id"], "title": r["title"], "content_preview": (r["content"] or "")[:300],
          "folder": r["folder"]}

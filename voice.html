@@ -179,6 +179,28 @@
       setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2500);
     }
 
+    // Честный текст тоста по факту сохранения (бэк шлёт saved={task, memory, memory_status}).
+    function memSaveToast(saved) {
+      saved = saved || {};
+      const memMsg = {
+        created: "заметка сохранена",
+        merged: "дополнил заметку",
+        duplicate: "заметка уже была записана",
+        updated: "заметка обновлена",
+      }[saved.memory_status];
+      const parts = [];
+      if (saved.task) parts.push("задача сохранена");
+      if (saved.memory && memMsg) parts.push(memMsg);
+      if (parts.length) {
+        let msg = "✓ " + parts.join(", ");
+        if (saved.memory_status === "title_exists") msg += " (заметку не записал — заголовок занят)";
+        return msg;
+      }
+      return saved.memory_status === "title_exists"
+        ? "⚠ Заметка с таким заголовком уже есть — не записал"
+        : "⚠ Нечего было сохранять";
+    }
+
     async function clearHistory() {
       if (messages.length === 0) return;
       if (!confirm("Очистить историю голосового чата?")) return;
@@ -496,7 +518,7 @@
               }
 
               if (data.type === "memory_saved") {
-                memToast("✓ Сохранено в память");
+                memToast(memSaveToast(data.saved));
               }
 
               if (data.type === "done") {

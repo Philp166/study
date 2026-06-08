@@ -761,7 +761,7 @@
               }
               if (data.type === "suggestion_applied") {
                 pendingSuggestion = null;
-                memToast("✓ Сохранено в память");
+                memToast(memSaveToast(data.saved));
               }
               if (data.type === "done" && data.leaf_message_id != null) currentLeaf = data.leaf_message_id;
               if (data.type === "error") typingEl.textContent = "Ошибка: " + data.message;
@@ -857,6 +857,28 @@
       document.body.appendChild(t);
       setTimeout(() => t.classList.add("show"), 10);
       setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2500);
+    }
+
+    // Честный текст тоста по факту сохранения (бэк шлёт saved={task, memory, memory_status}).
+    function memSaveToast(saved) {
+      saved = saved || {};
+      const memMsg = {
+        created: "заметка сохранена",
+        merged: "дополнил заметку",
+        duplicate: "заметка уже была записана",
+        updated: "заметка обновлена",
+      }[saved.memory_status];
+      const parts = [];
+      if (saved.task) parts.push("задача сохранена");
+      if (saved.memory && memMsg) parts.push(memMsg);
+      if (parts.length) {
+        let msg = "✓ " + parts.join(", ");
+        if (saved.memory_status === "title_exists") msg += " (заметку не записал — заголовок занят)";
+        return msg;
+      }
+      return saved.memory_status === "title_exists"
+        ? "⚠ Заметка с таким заголовком уже есть — не записал"
+        : "⚠ Нечего было сохранять";
     }
 
     function showTyping() {

@@ -20,7 +20,8 @@ _TASK_ACTIONS = {"create", "update", "close"}
 _MEMORY_ACTIONS = {"create", "update"}
 
 _MSG_CAP = 1000      # макс. символов на сообщение контекста
-_RECENT_LIMIT = 12   # сколько последних сообщений отдаём
+_RECENT_LIMIT = 4    # сколько последних сообщений отдаём (узкое окно: чем шире,
+                     # тем больше шанс приклеить связь из несвязанной ранней темы — баг B)
 
 
 def _strip_fences(text: str) -> str:

@@ -545,9 +545,11 @@ def api_memory_folders():
 
 def _apply_suggestion(task, memory) -> dict:
     """Применяет предложение классификатора к БД. Используется и кнопкой
-    подтверждения (эндпоинт ниже), и словесным «да» (в стриме). Если memory.create
-    с уже занятым title — пропускаем и сообщаем (не дублируем)."""
-    saved = {"task": False, "memory": False, "memory_skipped": None}
+    подтверждения (эндпоинт ниже), и словесным «да» (в стриме). При коллизии title
+    у memory.create НЕ теряем данные: дописываем в существующую заметку.
+    saved["memory"] == True ⟺ данные реально сохранены; memory_status поясняет как
+    именно (created | merged | duplicate | updated | title_exists)."""
+    saved = {"task": False, "memory": False, "memory_status": None}
     if isinstance(task, dict):
         a = task.get("action")
         if a == "create" and (task.get("title") or "").strip():
@@ -568,15 +570,24 @@ def _apply_suggestion(task, memory) -> dict:
     if isinstance(memory, dict):
         a = memory.get("action")
         if a == "create" and (memory.get("title") or "").strip():
+            title = memory["title"].strip()
+            content = memory.get("content") or ""
             row = db.create_memory(
-                title=memory["title"].strip(),
-                content=memory.get("content") or "",
+                title=title,
+                content=content,
                 folder=_norm_folder(memory.get("folder")),
             )
-            if row is None:
-                saved["memory_skipped"] = "title_exists"
-            else:
+            if row is not None:
                 saved["memory"] = True
+                saved["memory_status"] = "created"
+            else:
+                # title занят: дописываем в существующую, а не роняем с ложным «✓».
+                merged, how = db.merge_memory_content(title, content)
+                if merged is not None:
+                    saved["memory"] = True
+                    saved["memory_status"] = how        # "merged" | "duplicate"
+                else:
+                    saved["memory_status"] = "title_exists"
         elif a == "update" and memory.get("id"):
             fields = {}
             if memory.get("content") is not None:
@@ -588,6 +599,7 @@ def _apply_suggestion(task, memory) -> dict:
             if fields:
                 db.update_memory(memory["id"], **fields)
             saved["memory"] = True
+            saved["memory_status"] = "updated"
     return saved
 
 
