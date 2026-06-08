@@ -521,11 +521,12 @@ def _migrate_ltm_folder(conn):
 
 
 def _migrate_projects_and_links(conn):
-    """Идемпотентно (Этап 2): таблица projects (контейнер-сущность), FK project_id
-    на заметках/задачах (NULL, ON DELETE SET NULL), таблица memory_links
-    (материализованный граф [[..]], UNIQUE(source_id,target_title) для upsert).
-    При ПЕРВОМ создании memory_links — одноразовый бэкфилл из существующих заметок.
-    Кросс-СУБД; следует идиому ADD COLUMN ... REFERENCES (как parent_message_id)."""
+    """Идемпотентно: таблица memory_links (материализованный граф [[..]],
+    UNIQUE(source_id,target_title) для upsert) + одноразовый бэкфилл из заметок при
+    первом создании. ТАКЖЕ создаёт таблицу projects и колонки project_id — они теперь
+    ИНЕРТНЫ (сущность «проекты» убрана 2026-06-08, группировка = папки): код их не
+    читает/не пишет, но схему оставляем (дроп на живой dual-СУБД рискованнее пустого
+    столбца). Кросс-СУБД; идиома ADD COLUMN ... REFERENCES (как parent_message_id)."""
     real = "DOUBLE PRECISION" if _PG else "REAL"
     pk = "SERIAL PRIMARY KEY" if _PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
@@ -1310,12 +1311,12 @@ def delete_chat_fact_by_id(fact_id: int):
 
 # ── Долговременная память (long_term_memory) ──
 
-_MEMORY_FIELDS = {"title", "content", "folder", "status", "project_id"}
+_MEMORY_FIELDS = {"title", "content", "folder", "status"}
 
 # Wiki-ссылка [[Заголовок]] или [[Заголовок|алиас]] в markdown-теле заметки.
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
-_MEMORY_COLS = "id, title, content, folder, status, created_at, updated_at, project_id"
+_MEMORY_COLS = "id, title, content, folder, status, created_at, updated_at"
 
 
 def list_memory(folder: str | None = None, q: str | None = None) -> list[dict]:
@@ -1538,123 +1539,10 @@ def get_memory_folders() -> list[str]:
         return [r["folder"] for r in _fetchall(cur)]
 
 
-# ── Проекты (projects) — контейнер-сущность для заметок и задач (Этап 2) ──
-
-_PROJECT_COLS = "id, title, description, status, created_at, updated_at"
-_PROJECT_FIELDS = {"title", "description", "status"}
-
-
-def list_projects(status: str = "active") -> list[dict]:
-    """Проекты (по умолчанию активные), свежие сверху. status='' → все."""
-    with _connect() as conn:
-        if status:
-            cur = _execute(
-                conn,
-                f"SELECT {_PROJECT_COLS} FROM projects WHERE status={_P} ORDER BY updated_at DESC",
-                (status,),
-            )
-        else:
-            cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects ORDER BY updated_at DESC")
-        return _fetchall(cur)
-
-
-def get_project(project_id: int) -> dict | None:
-    with _connect() as conn:
-        cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects WHERE id={_P}", (project_id,))
-        return _fetchone(cur)
-
-
-def get_project_by_title(title: str) -> dict | None:
-    """Проект по нормализованному (trim+lower) title, любого статуса. Нужно агенту,
-    чтобы привязать заметку/задачу к существующему проекту по названию."""
-    norm = (title or "").strip().lower()
-    if not norm:
-        return None
-    with _connect() as conn:
-        cur = _execute(
-            conn,
-            f"SELECT {_PROJECT_COLS} FROM projects WHERE LOWER(TRIM(title))={_P} "
-            f"ORDER BY id LIMIT 1",
-            (norm,),
-        )
-        return _fetchone(cur)
-
-
-def create_project(title: str, description: str = "") -> dict | None:
-    """Создаёт проект. Если проект с таким title уже есть (по нормализованному
-    trim+lower — не плодим «Инфра»/«инфра») → None (=409). Проверка+вставка в одной
-    транзакции."""
-    t = (title or "").strip()
-    if not t:
-        return None
-    now = time.time()
-    with _connect() as conn:
-        cur = _execute(conn, f"SELECT id FROM projects WHERE LOWER(TRIM(title))={_P}", (t.lower(),))
-        if _fetchone(cur):
-            return None
-        new_id = _insert_returning_id(
-            conn,
-            f"INSERT INTO projects (title, description, status, created_at, updated_at) "
-            f"VALUES ({_P},{_P},'active',{_P},{_P})",
-            (t, description or "", now, now),
-        )
-        conn.commit()
-        cur = _execute(conn, f"SELECT {_PROJECT_COLS} FROM projects WHERE id={_P}", (new_id,))
-        return _fetchone(cur)
-
-
-def update_project(project_id: int, **fields) -> dict | None:
-    """Whitelist {title, description, status}. Обновляет updated_at. None если id нет."""
-    sets, vals = [], []
-    for k, v in fields.items():
-        if k not in _PROJECT_FIELDS:
-            continue
-        sets.append(f"{k}={_P}")
-        vals.append(v)
-    if not sets:
-        return get_project(project_id)
-    sets.append(f"updated_at={_P}")
-    vals.append(time.time())
-    vals.append(project_id)
-    with _connect() as conn:
-        _execute(conn, f"UPDATE projects SET {', '.join(sets)} WHERE id={_P}", vals)
-        conn.commit()
-    return get_project(project_id)
-
-
-def backfill_folders_to_projects() -> dict:
-    """Одноразово (идемпотентно): на каждую папку активных заметок заводит проект с
-    тем же названием и проставляет project_id заметкам этой папки, где он ещё NULL.
-    Поле folder НЕ удаляем (папки и проекты сосуществуют). Повторный вызов ничего не
-    добавит. Возвращает {projects_created, notes_linked}."""
-    created = linked = 0
-    for name in get_memory_folders():           # distinct non-null папки active-заметок
-        proj = get_project_by_title(name)
-        if proj is None:
-            proj = create_project(title=name)
-            if proj is not None:
-                created += 1
-        if proj is None:
-            continue
-        with _connect() as conn:
-            cur = _execute(
-                conn,
-                f"UPDATE long_term_memory SET project_id={_P} "
-                f"WHERE status='active' AND project_id IS NULL AND folder={_P}",
-                (proj["id"], name),
-            )
-            conn.commit()
-            n = getattr(cur, "rowcount", 0)
-            linked += n if (n and n > 0) else 0
-    return {"projects_created": created, "notes_linked": linked}
-
-
-def delete_project(project_id: int):
-    """Физическое удаление проекта. FK ON DELETE SET NULL отвяжет его заметки/задачи
-    (их project_id станет NULL), сами они не удаляются."""
-    with _connect() as conn:
-        _execute(conn, f"DELETE FROM projects WHERE id={_P}", (project_id,))
-        conn.commit()
+# Сущность «проекты» убрана по решению пользователя (2026-06-08): группировка =
+# папки (folder). Таблица projects и колонки project_id оставлены инертными в схеме
+# (см. _migrate_projects_and_links) — дроп на живой dual-СУБД рискованнее пустого
+# столбца; код их больше не читает и не пишет.
 
 
 # Частотные служебные слова: при пороге ≥3 они иначе матчат %LIKE% почти всё и
@@ -1763,28 +1651,21 @@ def relevant_memory(text: str, limit: int = 5) -> list[dict]:
 
 def search_memory(query: str, limit: int = 8) -> list[dict]:
     """Агентный retrieval: ищет заметки по запросу (стемминг + ранг по совпавшим
-    словам) и обогащает результат проектом и исходящими связями [[..]] — чтобы агент
-    мог достать факт по требованию и идти по связям. Возвращает [{id, title, content,
-    folder, project, links:[target_title], score}]. [] если запрос пуст/нет совпадений."""
+    словам) и обогащает результат исходящими связями [[..]] — чтобы агент мог достать
+    факт по требованию и идти по связям. Возвращает [{id, title, content, folder,
+    links:[target_title], score}]. [] если запрос пуст/нет совпадений."""
     stems = _query_stems(query)
     lim = max(1, int(limit))
     if not stems:
         return []
     with _connect() as conn:
         rows = _match_active_notes(
-            conn, stems, "id, title, content, folder, project_id, updated_at")
+            conn, stems, "id, title, content, folder, updated_at")
         ranked = _score_by_stems(rows, stems)[:lim]
         if not ranked:
             return []
         ids = [r["id"] for r in ranked]
         ph = ",".join([_P] * len(ids))
-        # проекты
-        proj_map = {}
-        proj_ids = [r["project_id"] for r in ranked if r.get("project_id")]
-        if proj_ids:
-            pph = ",".join([_P] * len(proj_ids))
-            cur = _execute(conn, f"SELECT id, title FROM projects WHERE id IN ({pph})", proj_ids)
-            proj_map = {p["id"]: p["title"] for p in _fetchall(cur)}
         # исходящие связи каждой найденной заметки
         cur = _execute(
             conn,
@@ -1795,7 +1676,6 @@ def search_memory(query: str, limit: int = 8) -> list[dict]:
         links_by_src = {}
         for r in _fetchall(cur):
             links_by_src.setdefault(r["source_id"], []).append(r["target_title"])
-    hay_stems = stems
     out = []
     for r in ranked:
         hay = ((r.get("title") or "") + " " + (r.get("content") or "")).lower()
@@ -1804,16 +1684,15 @@ def search_memory(query: str, limit: int = 8) -> list[dict]:
             "title": r["title"],
             "content": (r["content"] or "")[:600],
             "folder": r["folder"],
-            "project": proj_map.get(r.get("project_id")),
             "links": links_by_src.get(r["id"], []),
-            "score": sum(1 for s in hay_stems if s in hay),
+            "score": sum(1 for s in stems if s in hay),
         })
     return out
 
 
 # ── Буфер задач (tasks) ──
 
-_TASK_FIELDS = {"title", "context", "outcome", "status", "project_id"}
+_TASK_FIELDS = {"title", "context", "outcome", "status"}
 
 
 def list_tasks(status: str | None = None) -> list[dict]:

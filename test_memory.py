@@ -144,7 +144,7 @@ def test_merge_only_active_notes(fresh_db):
 def test_build_suggestion_save_memory_full():
     sug = agent.build_suggestion(
         "save_memory", {"title": " Сервер ", "content": " prod-узел ", "folder": " Инфра "})
-    assert sug == {"task": None, "project": None, "memory": {
+    assert sug == {"task": None, "memory": {
         "action": "create", "title": "Сервер", "content": "prod-узел", "folder": "Инфра"}}
 
 
@@ -162,13 +162,13 @@ def test_build_suggestion_blank_folder_dropped():
 def test_build_suggestion_save_task():
     sug = agent.build_suggestion("save_task", {"title": "Диагностика", "context": "до пятницы"})
     assert sug == {"task": {"action": "create", "title": "Диагностика", "context": "до пятницы"},
-                   "memory": None, "project": None}
+                   "memory": None}
 
 
 def test_build_suggestion_close_task():
     sug = agent.build_suggestion("close_task", {"title": "Диагностика", "outcome": "готово"})
     assert sug == {"task": {"action": "close", "title": "Диагностика", "outcome": "готово"},
-                   "memory": None, "project": None}
+                   "memory": None}
 
 
 def test_build_suggestion_requires_title():
@@ -255,40 +255,20 @@ def test_tool_result_msg_honest():
     ).startswith("Готово")
 
 
-# ── Этап 2a: миграции (projects, memory_links, project_id) ──
+# ── Этап 2a: миграции (memory_links; projects/project_id оставлены инертными) ──
 
 def test_migration_creates_tables_and_columns(fresh_db):
     with sqlite3.connect(str(fresh_db)) as raw:
         tables = {r[0] for r in raw.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {"projects", "memory_links"} <= tables
-        ltm_cols = {r[1] for r in raw.execute("PRAGMA table_info(long_term_memory)").fetchall()}
-        task_cols = {r[1] for r in raw.execute("PRAGMA table_info(tasks)").fetchall()}
-        assert "project_id" in ltm_cols and "project_id" in task_cols
+        assert "memory_links" in tables           # граф связей
+        assert "projects" in tables               # инертная (сущность убрана, схема осталась)
 
 
 def test_migration_idempotent(fresh_db):
-    p = db.create_project(title="Компьютер")
+    n = db.create_memory(title="Компьютер", content="сборка")
     db.init_db()  # повторный прогон не должен ломать данные/схему
-    assert db.get_project(p["id"])["title"] == "Компьютер"
-
-
-# ── Этап 2a: projects CRUD ──
-
-def test_project_create_unique_and_lookup(fresh_db):
-    p = db.create_project(title="Офис", description="переезд")
-    assert p["title"] == "Офис" and p["status"] == "active"
-    assert db.create_project(title="Офис") is None        # точный дубль title → None
-    assert db.get_project_by_title("  офис ")["id"] == p["id"]   # резолв нормализованный
-    assert db.create_project(title="   ") is None          # пустой title → None
-    assert [pr["id"] for pr in db.list_projects()] == [p["id"]]
-
-
-def test_project_update(fresh_db):
-    p = db.create_project(title="Офис")
-    db.update_project(p["id"], status="archived")
-    assert db.list_projects() == []                        # active по умолчанию
-    assert db.get_project(p["id"])["status"] == "archived"
+    assert db.get_memory(n["id"])["title"] == "Компьютер"
 
 
 # ── Этап 2a: материализованный граф memory_links ──
@@ -370,97 +350,6 @@ def test_links_backfill_from_existing_notes(tmp_path, monkeypatch):
     assert links[0]["target_id"] is not None    # бэкфилл + резолв связал target
 
 
-# ── Этап 2b: проекты — build_suggestion ──
-
-def test_build_suggestion_create_project():
-    sug = agent.build_suggestion("create_project", {"title": " Компьютер ", "description": " сборка "})
-    assert sug == {"task": None, "memory": None,
-                   "project": {"action": "create", "title": "Компьютер", "description": "сборка"}}
-
-
-def test_build_suggestion_project_field():
-    m = agent.build_suggestion("save_memory", {"title": "T", "content": "c", "project": " Офис "})
-    assert m["memory"]["project"] == "Офис"
-    t = agent.build_suggestion("save_task", {"title": "T", "project": "Офис"})
-    assert t["task"]["project"] == "Офис"
-    m2 = agent.build_suggestion("save_memory", {"title": "T", "content": "c", "project": "  "})
-    assert "project" not in m2["memory"]          # пустой project не добавляется
-
-
-# ── Этап 2b: _apply_suggestion проекты (закрытие бага A) ──
-
-def test_apply_create_project_slot(fresh_db):
-    saved = app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
-    assert saved["project"] is True and saved["project_status"] == "created"
-    assert db.get_project_by_title("компьютер")["title"] == "Компьютер"
-    saved2 = app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
-    assert saved2["project_status"] == "exists"   # повторно — не дубль
-
-
-def test_apply_bug_a_create_project_not_note(fresh_db):
-    """Acceptance бага A: «создай проект Компьютер» → строка в projects, НЕ заметка."""
-    app._apply_suggestion(None, None, {"action": "create", "title": "Компьютер"})
-    assert len(db.list_projects()) == 1
-    assert db.list_memory() == []                 # обычной заметки НЕ создано
-
-
-def test_apply_memory_with_project_resolves_or_creates(fresh_db):
-    saved = app._apply_suggestion(
-        None, {"action": "create", "title": "Сервер", "content": "prod", "project": "Инфра"}, None)
-    assert saved["memory"] is True
-    proj = db.get_project_by_title("Инфра")
-    assert proj is not None                        # проект создан автоматически
-    assert db.list_memory(q="Сервер")[0]["project_id"] == proj["id"]
-
-
-def test_apply_task_with_project(fresh_db):
-    p = db.create_project(title="Инфра")
-    app._apply_suggestion({"action": "create", "title": "Чинить", "project": "инфра"}, None, None)
-    assert db.find_active_task_by_title("Чинить")["project_id"] == p["id"]
-
-
-# ── Этап 2b: backfill + delete_project ──
-
-def test_backfill_folders_to_projects(fresh_db):
-    db.create_memory(title="A", content="x", folder="Офис")
-    db.create_memory(title="B", content="y", folder="Офис")
-    db.create_memory(title="C", content="z", folder=None)
-    res = db.backfill_folders_to_projects()
-    assert res == {"projects_created": 1, "notes_linked": 2}
-    proj = db.get_project_by_title("Офис")
-    linked = {n["title"] for n in db.list_memory() if n["project_id"] == proj["id"]}
-    assert linked == {"A", "B"}
-    assert db.backfill_folders_to_projects() == {"projects_created": 0, "notes_linked": 0}  # идемпотентно
-
-
-def test_delete_project_detaches_notes(fresh_db):
-    p = db.create_project(title="Офис")
-    n = db.create_memory(title="A", content="x")
-    db.update_memory(n["id"], project_id=p["id"])
-    assert db.get_memory(n["id"])["project_id"] == p["id"]
-    db.delete_project(p["id"])
-    assert db.get_memory(n["id"])["project_id"] is None   # FK ON DELETE SET NULL
-
-
-# ── Этап 2b: API проектов (прямые вызовы ручек) ──
-
-def test_api_projects_crud(fresh_db):
-    row = app.api_create_project({"title": "Офис", "description": "переезд"})
-    assert isinstance(row, dict) and row["title"] == "Офис"
-    dup = app.api_create_project({"title": "Офис"})
-    assert getattr(dup, "status_code", None) == 409
-    assert any(p["title"] == "Офис" for p in app.api_list_projects())
-    bad = app.api_create_project({"title": "  "})
-    assert getattr(bad, "status_code", None) == 400
-
-
-def test_create_project_normalized_dedup(fresh_db):
-    p = db.create_project(title="Инфра")
-    assert db.create_project(title="  инфра ") is None     # нормализованный дубль не создаём
-    assert app._resolve_or_create_project_id("ИНФРА") == p["id"]
-    assert len(db.list_projects()) == 1
-
-
 # ── Этап 3: стемминг ──
 
 def test_stem_inflections_collapse():
@@ -502,15 +391,13 @@ def test_search_memory_empty_and_no_match(fresh_db):
     assert db.search_memory("совершенно несвязанный зонтик") == []
 
 
-def test_search_memory_returns_content_project_links(fresh_db):
-    p = db.create_project(title="Инфра")
-    a = db.create_memory(title="Альфа", content="связана с [[Бета]]")
-    db.update_memory(a["id"], project_id=p["id"])
+def test_search_memory_returns_content_and_links(fresh_db):
+    db.create_memory(title="Альфа", content="связана с [[Бета]]", folder="Инфра")
     db.create_memory(title="Бета", content="деталь")
     res = db.search_memory("Альфа")
     item = [r for r in res if r["title"] == "Альфа"][0]
     assert item["content"].startswith("связана")
-    assert item["project"] == "Инфра"
+    assert item["folder"] == "Инфра"
     assert "Бета" in item["links"]
     assert item["score"] >= 1
 
@@ -518,8 +405,8 @@ def test_search_memory_returns_content_project_links(fresh_db):
 def test_format_search_results():
     assert "ничего не нашёл" in app._format_search_results([])
     txt = app._format_search_results([
-        {"title": "X", "content": "тело", "folder": "F", "project": "P", "links": ["Y"]}])
-    assert "X" in txt and "проект: P" in txt and "[[Y]]" in txt
+        {"title": "X", "content": "тело", "folder": "F", "links": ["Y"]}])
+    assert "X" in txt and "папка: F" in txt and "[[Y]]" in txt
 
 
 # ── Этап 4: голос уважает autosave (pending + устное «да») ──
@@ -541,8 +428,7 @@ def test_is_affirmative():
 def test_resolve_voice_pending_applies_on_yes(fresh_db):
     cid = "voice-yes"
     app._VOICE_PENDING[cid] = [
-        {"task": None, "project": None,
-         "memory": {"action": "create", "title": "Сервер", "content": "prod"}}]
+        {"task": None, "memory": {"action": "create", "title": "Сервер", "content": "prod"}}]
     saved = app._resolve_voice_pending(cid, "да, сохрани")
     assert len(saved) == 1 and saved[0]["memory"] is True
     assert cid not in app._VOICE_PENDING            # очищено
@@ -552,10 +438,8 @@ def test_resolve_voice_pending_applies_on_yes(fresh_db):
 def test_resolve_voice_pending_applies_multiple(fresh_db):
     cid = "voice-multi"
     app._VOICE_PENDING[cid] = [
-        {"task": None, "project": None,
-         "memory": {"action": "create", "title": "Аня", "content": "дизайнер"}},
-        {"task": {"action": "create", "title": "Демо", "context": "в пятницу"},
-         "memory": None, "project": None},
+        {"task": None, "memory": {"action": "create", "title": "Аня", "content": "дизайнер"}},
+        {"task": {"action": "create", "title": "Демо", "context": "в пятницу"}, "memory": None},
     ]
     saved = app._resolve_voice_pending(cid, "ага, давай")
     assert len(saved) == 2
@@ -565,8 +449,7 @@ def test_resolve_voice_pending_applies_multiple(fresh_db):
 def test_resolve_voice_pending_drops_on_no(fresh_db):
     cid = "voice-no"
     app._VOICE_PENDING[cid] = [
-        {"task": None, "project": None,
-         "memory": {"action": "create", "title": "X", "content": "y"}}]
+        {"task": None, "memory": {"action": "create", "title": "X", "content": "y"}}]
     assert app._resolve_voice_pending(cid, "нет, потом") == []
     assert cid not in app._VOICE_PENDING            # снято (не подтвердили)
     assert db.list_memory() == []                   # не записано
@@ -582,12 +465,10 @@ def test_api_apply_suggestion_items_list(fresh_db):
     body = {"items": [
         {"memory": {"action": "create", "title": "Команда", "content": "Аня, Петя"}},
         {"task": {"action": "create", "title": "Оффер", "context": "среда"}},
-        {"project": {"action": "create", "title": "Запуск"}},
     ]}
     res = app.api_apply_suggestion(body)
-    assert res["ok"] is True and len(res["saved"]) == 3
+    assert res["ok"] is True and len(res["saved"]) == 2
     assert db.list_memory(q="Команда") and db.find_active_task_by_title("Оффер")
-    assert db.get_project_by_title("Запуск") is not None
 
 
 def test_api_apply_suggestion_backcompat_single(fresh_db):

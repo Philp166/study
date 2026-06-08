@@ -178,7 +178,7 @@ VOICE_MEMORY_AUTOSAVE_OFF = """
 ## Сохранение в память (голос, подтверждение голосом)
 Автосохранение выключено, в голосе нет кнопок — подтверждение голосом, и его обеспечивает система.
 Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить/закрыть задачу:
-1. Сразу вызови нужный инструмент (save_memory / save_task / close_task / create_project). Он НЕ сохранит сразу, а подготовит запись и попросит переспросить.
+1. Сразу вызови нужный инструмент (save_memory / save_task / close_task). Он НЕ сохранит сразу, а подготовит запись и попросит переспросить.
 2. Коротко переспроси вслух: «Сохранить это в память?».
 3. Если в следующей реплике пользователь подтвердил («да», «давай», «сохрани», «ага», «угу», «верно») — запись применится САМА, просто скажи «Сохранил». НЕ вызывай инструмент повторно.
 4. Если пользователь отказался, передумал или сменил тему — ничего не делай, подготовленная запись отменится сама.
@@ -552,39 +552,6 @@ def _resolve_task_id(title) -> int | None:
     return found["id"] if found else None
 
 
-def _resolve_or_create_project_id(name) -> int | None:
-    """id проекта по названию; создаёт проект, если такого ещё нет (для поля
-    `project` у save_memory/save_task — отнести запись к проекту по названию)."""
-    n = (name or "").strip()
-    if not n:
-        return None
-    existing = db.get_project_by_title(n)
-    if existing:
-        return existing["id"]
-    created = db.create_project(title=n)
-    if created:
-        return created["id"]
-    again = db.get_project_by_title(n)   # гонка: кто-то создал параллельно
-    return again["id"] if again else None
-
-
-def _clean_project_id(value, clean: dict):
-    """Валидирует project_id из тела PATCH и кладёт в clean. None при успехе, иначе
-    JSONResponse с ошибкой. Пусто/0/None → отвязать (project_id=None). Существование
-    проекта проверяем заранее, чтобы не упасть на FK-ошибке."""
-    if value in (None, "", 0, "0"):
-        clean["project_id"] = None
-        return None
-    try:
-        pid = int(value)
-    except (TypeError, ValueError):
-        return JSONResponse(status_code=400, content={"error": "bad_project_id"})
-    if not db.get_project(pid):
-        return JSONResponse(status_code=400, content={"error": "project_not_found"})
-    clean["project_id"] = pid
-    return None
-
-
 def _tool_result_msg(saved: dict) -> str:
     """Короткий честный итог для агента по результату _apply_suggestion."""
     parts = []
@@ -603,12 +570,6 @@ def _tool_result_msg(saved: dict) -> str:
     }.get(saved.get("task_status"))
     if saved.get("task") and task_txt:
         parts.append(task_txt)
-    proj_txt = {
-        "created": "создал проект",
-        "exists": "проект уже существовал",
-    }.get(saved.get("project_status"))
-    if saved.get("project") and proj_txt:
-        parts.append(proj_txt)
     if parts:
         return "Готово: " + ", ".join(parts) + "."
     if saved.get("task_status") == "not_found":
@@ -625,8 +586,6 @@ def _format_search_results(results: list) -> str:
     lines = []
     for r in results:
         meta = []
-        if r.get("project"):
-            meta.append("проект: " + r["project"])
         if r.get("folder"):
             meta.append("папка: " + r["folder"])
         head = r.get("title") or ""
@@ -643,40 +602,18 @@ def _format_search_results(results: list) -> str:
     return "Нашёл в памяти:\n" + "\n".join(lines)
 
 
-def _apply_suggestion(task, memory, project=None) -> dict:
+def _apply_suggestion(task, memory) -> dict:
     """Применяет структурированное предложение (от типизированных инструментов агента
     или кнопки подтверждения) к БД. При коллизии title у memory.create НЕ теряем
     данные: дописываем в существующую заметку. Задачи close/update резолвятся по
-    title→id, если id не передан. Поле `project` у task/memory привязывает запись к
-    проекту по названию (создаёт проект, если его нет). saved["memory"]/["task"]/
-    ["project"] == True ⟺ данные реально сохранены; *_status поясняет как именно.
-
-    Атомарность: резолв id/проекта идёт ДО записи (ошибки валидации — без записей).
-    Каждая db-операция атомарна сама по себе (своя транзакция). Кросс-операционную
-    транзакцию сознательно не вводим: слоты project/task/memory семантически
-    независимы (проект не должен откатываться из-за сбоя отдельной заметки), а
-    единственная многошаговая запись внутри слота — заметка + опц. project_id —
-    при частичном сбое оставляет валидную заметку без опц. привязки (не потеря
-    данных). Полноценная общая транзакция потребовала бы протаскивания connection
-    через весь db-слой — несоразмерно для однопользовательского приложения."""
-    saved = {"task": False, "task_status": None, "memory": False,
-             "memory_status": None, "project": False, "project_status": None}
-    # 0. Явный create_project (слот project).
-    if isinstance(project, dict) and project.get("action") == "create" \
-            and (project.get("title") or "").strip():
-        row = db.create_project(
-            title=project["title"].strip(),
-            description=project.get("description") or "",
-        )
-        saved["project"] = True
-        saved["project_status"] = "created" if row is not None else "exists"
+    title→id, если id не передан. saved["memory"]/["task"] == True ⟺ данные реально
+    сохранены; *_status поясняет как именно. Резолв id идёт ДО записи; каждая
+    db-операция атомарна сама по себе (своя транзакция)."""
+    saved = {"task": False, "task_status": None, "memory": False, "memory_status": None}
     if isinstance(task, dict):
         a = task.get("action")
         if a == "create" and (task.get("title") or "").strip():
-            row = db.create_task(title=task["title"].strip(), context=task.get("context") or "")
-            pid = _resolve_or_create_project_id(task.get("project"))
-            if pid and row:
-                db.update_task(row["id"], project_id=pid)
+            db.create_task(title=task["title"].strip(), context=task.get("context") or "")
             saved["task"] = True
             saved["task_status"] = "created"
         elif a == "update":
@@ -713,12 +650,6 @@ def _apply_suggestion(task, memory, project=None) -> dict:
             if row is not None:
                 saved["memory"] = True
                 saved["memory_status"] = "created"
-                # Проект резолвим/создаём ТОЛЬКО для новой заметки — чтобы повторное
-                # «дублирующее» сохранение не перетащило существующую заметку в другой
-                # проект и не плодило orphan-проекты.
-                pid = _resolve_or_create_project_id(memory.get("project"))
-                if pid:
-                    db.update_memory(row["id"], project_id=pid)
             else:
                 # title занят: дописываем в существующую, а не роняем с ложным «✓».
                 merged, how = db.merge_memory_content(title, content)
@@ -745,73 +676,16 @@ def _apply_suggestion(task, memory, project=None) -> dict:
 @app.post("/api/suggestion/apply")
 def api_apply_suggestion(body: dict):
     """Применить предложение(я) памяти (кнопка «Подтвердить» на фронте). Принимает
-    список `items` (карточка-список) ИЛИ одиночные task/memory/project (back-compat).
+    список `items` (карточка-список) ИЛИ одиночные task/memory (back-compat).
     Возвращает saved-список по каждому элементу."""
     items = body.get("items")
     if not isinstance(items, list):
-        items = [{"task": body.get("task"), "memory": body.get("memory"),
-                  "project": body.get("project")}]
+        items = [{"task": body.get("task"), "memory": body.get("memory")}]
     saved = [
-        _apply_suggestion(it.get("task"), it.get("memory"), it.get("project"))
+        _apply_suggestion(it.get("task"), it.get("memory"))
         for it in items if isinstance(it, dict)
     ]
     return {"ok": True, "saved": saved}
-
-
-# ── Проекты (контейнеры). /backfill-folders регистрируется ДО /{project_id},
-# иначе FastAPI поймает "backfill-folders" как int-id и упадёт на валидации (422).
-@app.get("/api/projects")
-def api_list_projects(status: str = "active"):
-    return db.list_projects(status=status or "active")
-
-
-@app.post("/api/projects")
-def api_create_project(body: dict):
-    title = (body.get("title") or "").strip()
-    if not title:
-        return JSONResponse(status_code=400, content={"error": "title_required"})
-    row = db.create_project(title=title, description=body.get("description") or "")
-    if row is None:
-        return JSONResponse(status_code=409, content={"error": "title_exists"})
-    return row
-
-
-@app.post("/api/projects/backfill-folders")
-def api_backfill_folders():
-    """Одноразово: завести проект на каждую папку и проставить заметкам project_id."""
-    return db.backfill_folders_to_projects()
-
-
-@app.get("/api/projects/{project_id}")
-def api_get_project(project_id: int):
-    row = db.get_project(project_id)
-    if not row:
-        return JSONResponse(status_code=404, content={"error": "not_found"})
-    return row
-
-
-@app.patch("/api/projects/{project_id}")
-def api_update_project(project_id: int, body: dict):
-    clean = {}
-    if "title" in body:
-        title = (body["title"] or "").strip()
-        if not title:
-            return JSONResponse(status_code=400, content={"error": "title_required"})
-        clean["title"] = title
-    if "description" in body:
-        clean["description"] = body["description"] or ""
-    if "status" in body:
-        clean["status"] = body["status"]
-    row = db.update_project(project_id, **clean)
-    if not row:
-        return JSONResponse(status_code=404, content={"error": "not_found"})
-    return row
-
-
-@app.delete("/api/projects/{project_id}")
-def api_delete_project(project_id: int):
-    db.delete_project(project_id)
-    return {"ok": True}
 
 
 @app.get("/api/memory/{memory_id}")
@@ -838,10 +712,6 @@ def api_update_memory(memory_id: int, body: dict):
         if body["status"] not in MEMORY_STATUSES:
             return JSONResponse(status_code=400, content={"error": "bad_status"})
         clean["status"] = body["status"]
-    if "project_id" in body:
-        err = _clean_project_id(body["project_id"], clean)
-        if err:
-            return err
     row = db.update_memory(memory_id, **clean)
     if not row:
         return JSONResponse(status_code=404, content={"error": "not_found"})
@@ -897,10 +767,6 @@ def api_update_task(task_id: int, body: dict):
         if body["status"] not in TASK_STATUSES:
             return JSONResponse(status_code=400, content={"error": "bad_status"})
         clean["status"] = body["status"]
-    if "project_id" in body:
-        err = _clean_project_id(body["project_id"], clean)
-        if err:
-            return err
     row = db.update_task(task_id, **clean)
     if not row:
         return JSONResponse(status_code=404, content={"error": "not_found"})
@@ -963,7 +829,7 @@ def _stream_chat_response(chat_id: str, model: str,
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
                         "инструмент — ничего не сохранил.")
             if db.get_setting("memory_autosave", "false") == "true":
-                saved = _apply_suggestion(sug.get("task"), sug.get("memory"), sug.get("project"))
+                saved = _apply_suggestion(sug.get("task"), sug.get("memory"))
                 applied.append(saved)
                 return _tool_result_msg(saved)
             # autosave off: копим КАЖДЫЙ вызов отдельным пунктом одной карточки
@@ -1143,7 +1009,7 @@ def _resolve_voice_pending(chat_id, text) -> list:
     pend = _VOICE_PENDING.pop(chat_id)
     if not _is_affirmative(text):
         return []
-    return [_apply_suggestion(s.get("task"), s.get("memory"), s.get("project")) for s in pend]
+    return [_apply_suggestion(s.get("task"), s.get("memory")) for s in pend]
 
 
 @app.post("/voice/chat/stream")
@@ -1204,8 +1070,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
                             "вслух «Сохранить это в память?» — применю после устного «да».")
                 return ("Без активного чата не могу отложить подтверждение голосом — "
                         "предложи сохранить в текстовом чате.")
-            task, memory, project = sug.get("task"), sug.get("memory"), sug.get("project")
-            saved = _apply_suggestion(task, memory, project)
+            saved = _apply_suggestion(sug.get("task"), sug.get("memory"))
             loop.call_soon_threadsafe(text_queue.put_nowait, ("memory_saved", saved))
             return _tool_result_msg(saved)
 
