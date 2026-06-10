@@ -563,6 +563,10 @@
                 memToast(memSaveToast(data.saved));
               }
 
+              if (data.type === "memory_pending" && data.count) {
+                memToast("⏳ Подготовил записи (" + data.count + "). Скажи «да» — сохраню; карточка ждёт и в текстовом чате.");
+              }
+
               if (data.type === "done") {
                 messages.push({ role: "assistant", content: data.full_text || fullText });
               }

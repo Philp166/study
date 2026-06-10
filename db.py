@@ -9,6 +9,7 @@ DATABASE_URL задана → PostgreSQL (Render, прод).
 Линейный чат — вырожденное дерево, где у каждого сообщения один ребёнок.
 """
 
+import json
 import os
 import re
 import time
@@ -153,6 +154,12 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS pending_suggestions (
+    chat_id    TEXT PRIMARY KEY,
+    items      TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_archive (
     model                 TEXT NOT NULL,
     request_count         INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +253,12 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_suggestions (
+    chat_id    TEXT PRIMARY KEY,
+    items      TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage_archive (
@@ -1239,6 +1252,62 @@ def update_chat_fact(chat_id: str, key: str, value: str, branch_anchor_message_i
 def tombstone_chat_fact(chat_id: str, key: str, branch_anchor_message_id: int):
     """Удаляет факт в текущей ветке через надгробие (не трогая предков/сиблингов)."""
     add_chat_fact(chat_id, key, FACT_TOMBSTONE, branch_anchor_message_id)
+
+
+# ── Pending-предложения памяти ──
+# Неподтверждённая карточка (autosave=OFF) хранится в БД, а не в JS/процессе:
+# переживает reload, переход между разделами, редеплой и multi-worker. Одна
+# карточка на чат; новое предложение заменяет старое.
+
+def set_pending_suggestions(chat_id: str, items: list) -> None:
+    if not chat_id or not items:
+        return
+    payload = json.dumps(items, ensure_ascii=False)
+    now = time.time()
+    with _connect() as conn:
+        if _PG:
+            _execute(
+                conn,
+                f"INSERT INTO pending_suggestions (chat_id, items, created_at) "
+                f"VALUES ({_P},{_P},{_P}) ON CONFLICT (chat_id) DO UPDATE "
+                f"SET items=EXCLUDED.items, created_at=EXCLUDED.created_at",
+                (chat_id, payload, now),
+            )
+        else:
+            _execute(
+                conn,
+                f"INSERT OR REPLACE INTO pending_suggestions (chat_id, items, created_at) "
+                f"VALUES ({_P},{_P},{_P})",
+                (chat_id, payload, now),
+            )
+        conn.commit()
+
+
+def get_pending_suggestions(chat_id: str) -> list:
+    if not chat_id:
+        return []
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT items FROM pending_suggestions WHERE chat_id={_P}",
+            (chat_id,),
+        )
+        row = _fetchone(cur)
+    if not row:
+        return []
+    try:
+        items = json.loads(row["items"])
+        return items if isinstance(items, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def clear_pending_suggestions(chat_id: str) -> None:
+    if not chat_id:
+        return
+    with _connect() as conn:
+        _execute(conn, f"DELETE FROM pending_suggestions WHERE chat_id={_P}", (chat_id,))
+        conn.commit()
 
 
 # ── Долговременная память (long_term_memory) ──

@@ -352,6 +352,12 @@
       currentMessages = data.messages || [];
       currentTree = data.tree || [];
       currentLeaf = data.current_leaf_message_id ?? null;
+      // Неподтверждённая карточка памяти живёт в БД (в т.ч. из голосового чата) —
+      // показываем её при каждом открытии чата, пока не подтвердят/отклонят.
+      try {
+        const pend = await api("GET", `/api/chats/${currentId}/pending-memory`);
+        pendingSuggestion = (pend && Array.isArray(pend.items) && pend.items.length) ? pend.items : null;
+      } catch { pendingSuggestion = null; }
       // Подгрузить сохранённую статистику токенов из БД
       try {
         const usage = await api("GET", `/api/chats/${currentId}/usage`);
@@ -842,10 +848,22 @@
       btnAlways.className = "mem-suggestion-confirm mem-suggestion-always";
       btnAlways.textContent = "Подтверждать всегда";
       btnAlways.addEventListener("click", () => confirmSuggestion(box, true));
+      const btnDismiss = document.createElement("button");
+      btnDismiss.className = "mem-suggestion-confirm mem-suggestion-always";
+      btnDismiss.textContent = "✕ Отклонить";
+      btnDismiss.addEventListener("click", () => dismissSuggestion(box));
       actions.appendChild(btnOnce);
       actions.appendChild(btnAlways);
+      actions.appendChild(btnDismiss);
       box.appendChild(actions);
       host.appendChild(box);
+    }
+
+    async function dismissSuggestion(box) {
+      pendingSuggestion = null;
+      box.querySelectorAll("button").forEach((b) => (b.disabled = true));
+      try { await api("DELETE", `/api/chats/${currentId}/pending-memory`); } catch {}
+      box.innerHTML = '<div class="mem-suggestion-saved">Отклонено — ничего не сохранил.</div>';
     }
 
     async function confirmSuggestion(box, always) {
@@ -855,7 +873,7 @@
       box.querySelectorAll("button").forEach((b) => (b.disabled = true));
       const n = items.length;
       try {
-        const r = await api("POST", "/api/suggestion/apply", { items });
+        const r = await api("POST", "/api/suggestion/apply", { items, chat_id: currentId });
         const saved = (r && Array.isArray(r.saved)) ? r.saved : [];
         const ok = saved.filter((s) => s && (s.memory || s.task)).length;
         const label = ok >= n

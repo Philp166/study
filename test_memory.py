@@ -374,6 +374,69 @@ def test_tool_result_msg_new_statuses():
         {"task": False, "task_status": None, "memory": False, "memory_status": "not_found"})
 
 
+# ── Блок 6: персистентный pending (карточка переживает reload/редеплой) ──
+
+def _mk_chat():
+    return db.create_chat(title="t")
+
+
+def test_pending_set_get_clear(fresh_db):
+    cid = _mk_chat()
+    items = [{"task": None, "memory": {"action": "create", "title": "X", "content": "y"}}]
+    db.set_pending_suggestions(cid, items)
+    assert db.get_pending_suggestions(cid) == items
+    db.clear_pending_suggestions(cid)
+    assert db.get_pending_suggestions(cid) == []
+
+
+def test_pending_replaced_not_appended(fresh_db):
+    cid = _mk_chat()
+    db.set_pending_suggestions(cid, [{"task": {"action": "create", "title": "A"}, "memory": None}])
+    db.set_pending_suggestions(cid, [{"task": {"action": "create", "title": "B"}, "memory": None}])
+    pend = db.get_pending_suggestions(cid)
+    assert len(pend) == 1 and pend[0]["task"]["title"] == "B"
+
+
+def test_voice_pending_applies_on_yes(fresh_db):
+    cid = _mk_chat()
+    db.set_pending_suggestions(cid, [
+        {"task": {"action": "create", "title": "Аренда офиса"}, "memory": None}])
+    saved = app._resolve_voice_pending(cid, "да, сохраняй")
+    assert len(saved) == 1 and saved[0]["task_status"] == "created"
+    assert db.find_active_task_by_title("Аренда офиса") is not None
+    assert db.get_pending_suggestions(cid) == []  # применённое очищено
+
+
+def test_voice_pending_survives_topic_change(fresh_db):
+    # смена темы больше НЕ выбрасывает подготовленное — карточка остаётся
+    cid = _mk_chat()
+    items = [{"task": {"action": "create", "title": "Закуп канцелярии"}, "memory": None}]
+    db.set_pending_suggestions(cid, items)
+    saved = app._resolve_voice_pending(cid, "кстати, какая погода в офисе?")
+    assert saved == []
+    assert db.get_pending_suggestions(cid) == items  # живо
+    assert db.find_active_task_by_title("Закуп канцелярии") is None  # но не применено
+
+
+def test_voice_pending_cleared_on_explicit_no(fresh_db):
+    cid = _mk_chat()
+    db.set_pending_suggestions(cid, [
+        {"task": {"action": "create", "title": "Лишнее"}, "memory": None}])
+    saved = app._resolve_voice_pending(cid, "нет, не надо")
+    assert saved == []
+    assert db.get_pending_suggestions(cid) == []  # явный отказ очищает
+    assert db.find_active_task_by_title("Лишнее") is None
+
+
+def test_apply_endpoint_clears_pending(fresh_db):
+    cid = _mk_chat()
+    items = [{"task": None, "memory": {"action": "create", "title": "Офис", "content": "10 чел"}}]
+    db.set_pending_suggestions(cid, items)
+    r = app.api_apply_suggestion({"items": items, "chat_id": cid})
+    assert r["saved"][0]["memory_status"] == "created"
+    assert db.get_pending_suggestions(cid) == []
+
+
 # ── Этап 2a: миграции (memory_links; projects/project_id оставлены инертными) ──
 
 def test_migration_creates_tables_and_columns(fresh_db):
@@ -546,20 +609,20 @@ def test_is_affirmative():
 
 def test_resolve_voice_pending_applies_on_yes(fresh_db):
     cid = "voice-yes"
-    app._VOICE_PENDING[cid] = [
-        {"task": None, "memory": {"action": "create", "title": "Сервер", "content": "prod"}}]
+    db.set_pending_suggestions(cid, [
+        {"task": None, "memory": {"action": "create", "title": "Сервер", "content": "prod"}}])
     saved = app._resolve_voice_pending(cid, "да, сохрани")
     assert len(saved) == 1 and saved[0]["memory"] is True
-    assert cid not in app._VOICE_PENDING            # очищено
+    assert db.get_pending_suggestions(cid) == []    # очищено
     assert db.list_memory(q="Сервер")               # реально записано
 
 
 def test_resolve_voice_pending_applies_multiple(fresh_db):
     cid = "voice-multi"
-    app._VOICE_PENDING[cid] = [
+    db.set_pending_suggestions(cid, [
         {"task": None, "memory": {"action": "create", "title": "Аня", "content": "дизайнер"}},
         {"task": {"action": "create", "title": "Демо", "context": "в пятницу"}, "memory": None},
-    ]
+    ])
     saved = app._resolve_voice_pending(cid, "ага, давай")
     assert len(saved) == 2
     assert db.list_memory(q="Аня") and db.find_active_task_by_title("Демо")
@@ -567,10 +630,10 @@ def test_resolve_voice_pending_applies_multiple(fresh_db):
 
 def test_resolve_voice_pending_drops_on_no(fresh_db):
     cid = "voice-no"
-    app._VOICE_PENDING[cid] = [
-        {"task": None, "memory": {"action": "create", "title": "X", "content": "y"}}]
+    db.set_pending_suggestions(cid, [
+        {"task": None, "memory": {"action": "create", "title": "X", "content": "y"}}])
     assert app._resolve_voice_pending(cid, "нет, потом") == []
-    assert cid not in app._VOICE_PENDING            # снято (не подтвердили)
+    assert db.get_pending_suggestions(cid) == []    # явный отказ очищает
     assert db.list_memory() == []                   # не записано
 
 

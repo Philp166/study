@@ -155,7 +155,10 @@ DEFAULT_MODEL = "claude-opus-4-6"
 
 TTS_VOICE_DEFAULT = "ru-RU-SvetlanaNeural"
 VOICE_MODEL = "claude-haiku-4-5"
-VOICE_MAX_TOKENS = 500
+# Запас под tool-use: несколько вызовов save_memory/save_task в одном ходу не
+# влезали в 500 (обрезка JSON инструмента = молча несработавшее сохранение).
+# Краткость устного ответа держит промпт, а не потолок токенов.
+VOICE_MAX_TOKENS = 2000
 
 VOICE_SYSTEM_ADDENDUM = """
 
@@ -179,10 +182,10 @@ VOICE_MEMORY_AUTOSAVE_OFF = """
 ## Сохранение в память (голос, подтверждение голосом)
 Автосохранение выключено, в голосе нет кнопок — подтверждение голосом, и его обеспечивает система.
 Когда пользователь явно просит запомнить/сохранить/записать что-то или отметить/закрыть задачу:
-1. Сразу вызови нужный инструмент (save_memory / save_task / close_task). Он НЕ сохранит сразу, а подготовит запись и попросит переспросить.
-2. Коротко переспроси вслух: «Сохранить это в память?».
-3. Если в следующей реплике пользователь подтвердил («да», «давай», «сохрани», «ага», «угу», «верно») — запись применится САМА, просто скажи «Сохранил». НЕ вызывай инструмент повторно.
-4. Если пользователь отказался, передумал или сменил тему — ничего не делай, подготовленная запись отменится сама.
+1. ОБЯЗАТЕЛЬНО сначала вызови нужные инструменты (save_memory / save_task / close_task...) — столько вызовов, сколько сущностей/задач в просьбе. Говорить «записал/сохраняю/записываю» БЕЗ вызова инструментов ЗАПРЕЩЕНО — без вызова НИЧЕГО не сохраняется, это обман пользователя. Инструмент НЕ сохранит сразу, а подготовит запись.
+2. Затем коротко переспроси вслух: «Сохранить это в память?».
+3. Если в следующей реплике пользователь подтвердил («да», «давай», «сохрани», «ага», «угу», «верно») — записи применятся САМИ, просто скажи «Сохранил». НЕ вызывай инструменты повторно.
+4. Если пользователь явно отказался («нет», «не надо», «отмена») — записи отменятся сами. Если он просто сменил тему — записи останутся ждать подтверждения карточкой в текстовом чате; можешь напомнить об этом.
 """
 
 
@@ -687,6 +690,7 @@ def _apply_suggestion(task, memory) -> dict:
 def api_apply_suggestion(body: dict):
     """Применить предложение(я) памяти (кнопка «Подтвердить» на фронте). Принимает
     список `items` (карточка-список) ИЛИ одиночные task/memory (back-compat).
+    chat_id (опц.) — очистить персистентный pending этого чата после применения.
     Возвращает saved-список по каждому элементу."""
     items = body.get("items")
     if not isinstance(items, list):
@@ -695,7 +699,23 @@ def api_apply_suggestion(body: dict):
         _apply_suggestion(it.get("task"), it.get("memory"))
         for it in items if isinstance(it, dict)
     ]
+    chat_id = body.get("chat_id")
+    if chat_id:
+        db.clear_pending_suggestions(chat_id)
     return {"ok": True, "saved": saved}
+
+
+@app.get("/api/chats/{chat_id}/pending-memory")
+def api_get_pending_memory(chat_id: str):
+    """Неподтверждённая карточка памяти чата (если есть) — для рендера при загрузке."""
+    return {"items": db.get_pending_suggestions(chat_id)}
+
+
+@app.delete("/api/chats/{chat_id}/pending-memory")
+def api_dismiss_pending_memory(chat_id: str):
+    """Отклонить карточку (кнопка «Отклонить»): ничего не применять, просто убрать."""
+    db.clear_pending_suggestions(chat_id)
+    return {"ok": True}
 
 
 @app.get("/api/memory/{memory_id}")
@@ -867,6 +887,8 @@ def _stream_chat_response(chat_id: str, model: str,
             for saved in applied:
                 yield f"data: {json.dumps({'type': 'suggestion_applied', 'saved': saved})}\n\n"
             if pending_items:
+                # персистим: карточка переживает reload/переход (см. db.pending_suggestions)
+                db.set_pending_suggestions(chat_id, pending_items)
                 yield f"data: {json.dumps({'type': 'memory_suggestion', 'items': pending_items})}\n\n"
 
             yield f"data: {json.dumps({'type': 'done', 'leaf_message_id': assistant_id})}\n\n"
@@ -983,10 +1005,9 @@ def memory_page():
 
 
 # Отложенные голосовые сохранения при autosave=OFF: в голосе нет кнопки, поэтому
-# подтверждение даётся устным «да» на СЛЕДУЮЩЕЙ реплике. Храним предложенную запись
-# на бэке (ключ — chat_id) до подтверждения. Эфемерно (живёт в процессе) — для
-# короткой голосовой сессии этого достаточно.
-_VOICE_PENDING: dict[str, dict] = {}
+# подтверждение даётся устным «да» на СЛЕДУЮЩЕЙ реплике. Отложенные записи хранятся
+# в БД (db.pending_suggestions) — переживают редеплой и видны карточкой в текстовом
+# чате (раньше — in-process dict, терялся при рестарте и любой не-«да» реплике).
 
 _AFFIRMATIVE_RE = re.compile(
     r"\b(да|ага|угу|угум|давай|давайте|сохрани|сохраните|запиши|запишите|верно|"
@@ -1012,15 +1033,22 @@ def _is_affirmative(text: str) -> bool:
 
 
 def _resolve_voice_pending(chat_id, text) -> list:
-    """Если для chat_id есть отложенные записи (список): применить ВСЕ при устном
-    «да», иначе снять (не подтвердил/сменил тему). Возвращает список saved-словарей
-    (пустой, если нечего применять или не подтвердили)."""
-    if not chat_id or chat_id not in _VOICE_PENDING:
+    """Если у чата есть отложенные записи: применить ВСЕ при устном «да»; снять при
+    явном отказе («нет/не надо/отмена»). Любая ДРУГАЯ реплика записи НЕ трогает —
+    они остаются в БД и подтверждаемы карточкой в текстовом чате (раньше любая
+    не-«да» реплика молча выбрасывала подготовленное). Возвращает список
+    saved-словарей (пустой, если нечего применять или не подтвердили)."""
+    if not chat_id:
         return []
-    pend = _VOICE_PENDING.pop(chat_id)
-    if not _is_affirmative(text):
+    pend = db.get_pending_suggestions(chat_id)
+    if not pend:
         return []
-    return [_apply_suggestion(s.get("task"), s.get("memory")) for s in pend]
+    if _is_affirmative(text):
+        db.clear_pending_suggestions(chat_id)
+        return [_apply_suggestion(s.get("task"), s.get("memory")) for s in pend]
+    if _NEGATION_RE.search(text or ""):
+        db.clear_pending_suggestions(chat_id)
+    return []
 
 
 @app.post("/voice/chat/stream")
@@ -1038,7 +1066,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
     # бы и применилось позже на несвязанном «да»).
     voice_pending_saved = []
     if voice_autosave:
-        _VOICE_PENDING.pop(req.chat_id, None)
+        db.clear_pending_suggestions(req.chat_id)
     else:
         voice_pending_saved = _resolve_voice_pending(req.chat_id, req.text)
 
@@ -1068,6 +1096,7 @@ async def voice_chat_stream(req: VoiceChatRequest):
             yield f"data: {json.dumps({'type': 'memory_saved', 'saved': _saved})}\n\n"
         text_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        voice_pending_new = []   # подготовленные за этот ход записи (autosave=OFF)
 
         def voice_tool_handler(name, tool_input):
             if name == "search_memory":
@@ -1077,10 +1106,10 @@ async def voice_chat_stream(req: VoiceChatRequest):
                 return ("Не передал обязательные поля (как минимум title) или неизвестный "
                         "инструмент — ничего не сохранил.")
             if not voice_autosave:
-                # OFF: не пишем сразу — копим в pending (список), применим ВСЕ по
-                # устному «да» на следующей реплике (тумблер реально работает).
+                # OFF: не пишем сразу — копим; в конце хода ляжет в БД-pending,
+                # применится по устному «да» или карточкой в текстовом чате.
                 if req.chat_id:
-                    _VOICE_PENDING.setdefault(req.chat_id, []).append(sug)
+                    voice_pending_new.append(sug)
                     return ("Изменение подготовлено, но ЕЩЁ НЕ применено. ЗАПРЕЩЕНО говорить "
                             "«сохранил/удалил» — переспроси у пользователя вслух «Сохранить "
                             "это в память?» — применю после устного «да».")
@@ -1138,6 +1167,11 @@ async def voice_chat_stream(req: VoiceChatRequest):
                     audio = await tts_text(sentence_buffer.strip())
                     if audio:
                         yield f"data: {json.dumps({'type': 'audio', 'data': audio})}\n\n"
+                if voice_pending_new and req.chat_id:
+                    # персистим подготовленное: применится по устному «да» или
+                    # карточкой при открытии этого чата в текстовом UI
+                    db.set_pending_suggestions(req.chat_id, voice_pending_new)
+                    yield f"data: {json.dumps({'type': 'memory_pending', 'count': len(voice_pending_new)})}\n\n"
                 if req.chat_id and full_text:
                     db.add_message(req.chat_id, "assistant", full_text,
                                    parent_message_id=voice_user_id)
