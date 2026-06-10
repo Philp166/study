@@ -90,6 +90,16 @@
     .btn-danger:hover { background: rgba(255, 46, 99, .1); border-color: var(--magenta); color: var(--magenta); box-shadow: 0 0 18px rgba(255, 46, 99, .2); }
     .dossier-close { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-family: var(--f-mono); font-size: 16px; }
     .dossier-close:hover { color: var(--magenta); }
+
+    /* ── Диалоги в стиле HUD (вместо нативных alert/confirm/prompt) ── */
+    .cosd-overlay { display: none; position: fixed; inset: 0; background: rgba(5, 6, 20, .7); z-index: 300; backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); align-items: center; justify-content: center; }
+    .cosd-overlay.open { display: flex; }
+    .cosd { width: 360px; max-width: 92vw; background: linear-gradient(180deg, rgba(15, 16, 48, .97), rgba(10, 10, 31, .98)); border: 1px solid var(--line-2); box-shadow: 0 0 40px rgba(0, 0, 0, .6); padding: 16px; clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px); }
+    .cosd-msg { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-0); line-height: 1.6; margin-bottom: 14px; white-space: pre-wrap; word-break: break-word; }
+    .cosd input { width: 100%; background: var(--bg-1); border: 1px solid var(--line); color: var(--ink-0); font-family: var(--f-mono); font-size: 12.5px; padding: 8px 10px; margin-bottom: 14px; }
+    .cosd input:focus { border-color: var(--cyan); outline: 0; }
+    .cosd-actions { display: flex; gap: 8px; }
+    .cosd-actions .btn { flex: 1; justify-content: center; }
   </style>
 </head>
 <body class="memory-page">
@@ -138,6 +148,17 @@
       </svg>
       <div id="mem-empty" class="mem-empty" hidden>Пока нет заметок. Нажми «+ Новая заметка».</div>
     </main>
+  </div>
+
+  <div id="cosd-overlay" class="cosd-overlay">
+    <div class="cosd">
+      <div id="cosd-msg" class="cosd-msg"></div>
+      <input id="cosd-input" type="text" autocomplete="off" style="display:none" />
+      <div class="cosd-actions">
+        <button id="cosd-ok" class="btn btn-primary">OK</button>
+        <button id="cosd-cancel" class="btn">Отмена</button>
+      </div>
+    </div>
   </div>
 
   <div id="dossier-overlay" class="dossier-overlay"></div>
@@ -224,7 +245,14 @@
     let currentNote = null, currentTask = null;
     let moved = 0, tweenRAF = null, layoutRAF = null;
     const expanded = new Set();
-    const localFolders = new Set();            // папки, созданные кнопкой, ещё без заметок
+    // Папки, созданные кнопкой и ещё без заметок: в localStorage, чтобы пережить F5.
+    // Как только в папке появляется заметка, она приходит из API и из стораджа уходит.
+    const LOCAL_FOLDERS_KEY = "cos_mem_local_folders";
+    let localFolders = new Set();
+    try { localFolders = new Set(JSON.parse(localStorage.getItem(LOCAL_FOLDERS_KEY) || "[]")); } catch {}
+    function saveLocalFolders() {
+      try { localStorage.setItem(LOCAL_FOLDERS_KEY, JSON.stringify([...localFolders])); } catch {}
+    }
 
     // ── DOM ──
     const svg        = document.getElementById("mem-canvas");
@@ -241,6 +269,42 @@
 
     const SVGNS = "http://www.w3.org/2000/svg";
     const byId = (id) => document.getElementById(id);
+
+    // ── HUD-диалоги (promise-обёртки вместо нативных alert/confirm/prompt) ──
+    const cosdOv = document.getElementById("cosd-overlay");
+    const cosdMsg = document.getElementById("cosd-msg");
+    const cosdInput = document.getElementById("cosd-input");
+    const cosdOk = document.getElementById("cosd-ok");
+    const cosdCancel = document.getElementById("cosd-cancel");
+    function _cosDialog({ message, input = false, cancel = true }) {
+      return new Promise((resolve) => {
+        cosdMsg.textContent = message;
+        cosdInput.style.display = input ? "block" : "none";
+        cosdInput.value = "";
+        cosdCancel.style.display = cancel ? "" : "none";
+        cosdOv.classList.add("open");
+        if (input) cosdInput.focus();
+        function close(result) {
+          cosdOv.classList.remove("open");
+          cosdOk.removeEventListener("click", onOk);
+          cosdCancel.removeEventListener("click", onCancel);
+          cosdInput.removeEventListener("keydown", onKey);
+          window.removeEventListener("keydown", onEsc);
+          resolve(result);
+        }
+        const onOk = () => close(input ? cosdInput.value : true);
+        const onCancel = () => close(input ? null : false);
+        const onKey = (e) => { if (e.key === "Enter") onOk(); };
+        const onEsc = (e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } };
+        cosdOk.addEventListener("click", onOk);
+        cosdCancel.addEventListener("click", onCancel);
+        cosdInput.addEventListener("keydown", onKey);
+        window.addEventListener("keydown", onEsc, true);
+      });
+    }
+    const cosAlert = (message) => _cosDialog({ message, cancel: false });
+    const cosConfirm = (message) => _cosDialog({ message });
+    const cosPrompt = (message) => _cosDialog({ message, input: true });
     const noteById = (id) => notes.find((n) => String(n.id) === String(id));
     function el(tag, attrs) {
       const e = document.createElementNS(SVGNS, tag);
@@ -615,6 +679,11 @@
       links = Array.isArray(l) ? l : [];
       tasks = Array.isArray(t) ? t : [];
       folders = Array.isArray(f) ? f : [];
+      // папка обзавелась заметками → теперь живёт в БД, из локального стораджа убираем
+      if ([...localFolders].some((name) => folders.includes(name))) {
+        folders.forEach((name) => localFolders.delete(name));
+        saveLocalFolders();
+      }
     }
     // mode: 'full' (детерминированный пересчёт, FULL_ITERS), 'relax' (короткая
     //       дорелаксация от текущих позиций), 'none' (без пересчёта позиций)
@@ -739,14 +808,14 @@
 
     async function saveNote() {
       const title = byId("d-title").value.trim();
-      if (!title) { alert("Заголовок обязателен"); return; }
+      if (!title) { await cosAlert("Заголовок обязателен"); return; }
       const payload = { title, folder: byId("d-folder").value, content: byId("d-content").value };
       const editing = !!currentNote;
       const r = editing
         ? await api("PATCH", "/api/memory/" + currentNote.id, payload)
         : await api("POST", "/api/memory", payload);
       if (r && r.error) {
-        alert(r.error === "title_exists" ? "Заметка с таким заголовком уже существует" : "Ошибка: " + r.error);
+        await cosAlert(r.error === "title_exists" ? "Заметка с таким заголовком уже существует" : "Ошибка: " + r.error);
         return;
       }
       closeDossier();
@@ -755,7 +824,7 @@
 
     async function deleteNote() {
       if (!currentNote) return;
-      if (!confirm("Удалить заметку «" + currentNote.title + "»? (мягкое удаление)")) return;
+      if (!await cosConfirm("Удалить заметку «" + currentNote.title + "»? (мягкое удаление)")) return;
       await api("PATCH", "/api/memory/" + currentNote.id, { status: "inactive" });
       closeDossier();
       await reload("none");
@@ -763,20 +832,20 @@
 
     async function saveTask() {
       const title = byId("t-title").value.trim();
-      if (!title) { alert("Заголовок обязателен"); return; }
+      if (!title) { await cosAlert("Заголовок обязателен"); return; }
       const payload = {
         title, status: byId("t-status").value,
         context: byId("t-context").value, outcome: byId("t-outcome").value,
       };
       const r = await api("PATCH", "/api/tasks/" + currentTask.id, payload);
-      if (r && r.error) { alert("Ошибка: " + r.error); return; }
+      if (r && r.error) { await cosAlert("Ошибка: " + r.error); return; }
       closeDossier();
       await reload("relax");   // статус/контекст задачи меняют граф (узлы/рёбра)
     }
 
     async function deleteTask() {
       if (!currentTask) return;
-      if (!confirm("Удалить задачу «" + currentTask.title + "»?")) return;
+      if (!await cosConfirm("Удалить задачу «" + currentTask.title + "»?")) return;
       await api("DELETE", "/api/tasks/" + currentTask.id);
       closeDossier();
       await reload("none");
@@ -816,10 +885,11 @@
     // ── Прочие обработчики ──
     searchEl.addEventListener("input", () => { searchQuery = searchEl.value.trim().toLowerCase(); applyFilters(); });
     byId("mem-new").addEventListener("click", () => { closeSidebar(); openNote(null); });
-    byId("mem-new-folder").addEventListener("click", () => {
-      const name = (prompt("Имя новой папки:") || "").trim();
+    byId("mem-new-folder").addEventListener("click", async () => {
+      const name = ((await cosPrompt("Имя новой папки:")) || "").trim();
       if (!name) return;
       localFolders.add(name);   // в БД появится, когда сохранишь заметку в эту папку
+      saveLocalFolders();
       renderSidebar();
     });
     byId("dossier-close").addEventListener("click", closeDossier);
