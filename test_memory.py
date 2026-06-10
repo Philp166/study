@@ -326,10 +326,15 @@ def test_apply_archive_task_works_for_completed(fresh_db):
     assert db.get_task(t["id"])["status"] == "archived"
 
 
-def test_apply_delete_task_hard(fresh_db):
+def test_apply_delete_task_is_two_stage(fresh_db):
+    # живая задача: «удалить» = убрать в архив (восстановима), строка остаётся
     t = db.create_task(title="Мусор", context="")
-    saved = app._apply_suggestion({"action": "delete", "title": "Мусор"}, None)
-    assert saved["task"] is True and saved["task_status"] == "deleted"
+    s1 = app._apply_suggestion({"action": "delete", "title": "Мусор"}, None)
+    assert s1["task"] is True and s1["task_status"] == "archived"
+    assert db.get_task(t["id"])["status"] == "archived"
+    # повторное удаление уже архивной — безвозвратно
+    s2 = app._apply_suggestion({"action": "delete", "title": "Мусор"}, None)
+    assert s2["task"] is True and s2["task_status"] == "deleted"
     assert db.get_task(t["id"]) is None
 
 

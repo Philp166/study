@@ -602,14 +602,21 @@ def _apply_suggestion(task, memory) -> dict:
             else:
                 saved["task_status"] = "not_found"
         elif a == "delete":
-            tid = task.get("id") or _resolve_task_id(
-                task.get("title"), ("active", "completed", "archived"))
-            if tid:
-                db.delete_task(tid)
+            # двухступенчато: живая задача сперва в архив (восстановима),
+            # безвозвратно удаляется только уже архивная
+            row = (db.get_task(task["id"]) if task.get("id")
+                   else db.find_task_by_title(task.get("title"),
+                                              ("active", "completed", "archived")))
+            if row is None:
+                saved["task_status"] = "not_found"
+            elif row["status"] != "archived":
+                db.update_task(row["id"], status="archived")
+                saved["task"] = True
+                saved["task_status"] = "archived"
+            else:
+                db.delete_task(row["id"])
                 saved["task"] = True
                 saved["task_status"] = "deleted"
-            else:
-                saved["task_status"] = "not_found"
     if isinstance(memory, dict):
         a = memory.get("action")
         if a == "create" and (memory.get("title") or "").strip():

@@ -784,7 +784,7 @@
         '<div class="dossier-field"><label>Предпросмотр</label><div id="t-preview" class="mem-preview"></div></div>' +
         '<div class="dossier-field" id="t-outcome-wrap"><label>Итог</label><textarea id="t-outcome">' + escapeHtml(t.outcome) + "</textarea></div>" +
         '<div class="dossier-actions"><button id="t-save" class="btn btn-primary">Сохранить</button>' +
-        '<button id="t-del" class="btn btn-danger">Удалить</button></div>' +
+        '<button id="t-del" class="btn btn-danger">' + (t.status === "archived" ? "Удалить насовсем" : "В архив") + '</button></div>' +
         '<div class="dossier-dates">Создано: ' + fmt(t.created_at) + "<br>Обновлено: " + fmt(t.updated_at) + "<br>Закрыто: " + fmt(t.closed_at) + "</div>";
 
       const statusEl = byId("t-status"), wrap = byId("t-outcome-wrap");
@@ -843,12 +843,19 @@
       await reload("relax");   // статус/контекст задачи меняют граф (узлы/рёбра)
     }
 
+    // Удаление двухступенчатое: живая задача сперва уходит в архив (восстановима
+    // через статус-селект), безвозвратно удаляется только уже архивная.
     async function deleteTask() {
       if (!currentTask) return;
-      if (!await cosConfirm("Удалить задачу «" + currentTask.title + "»?")) return;
-      await api("DELETE", "/api/tasks/" + currentTask.id);
+      if (currentTask.status !== "archived") {
+        if (!await cosConfirm("Убрать задачу «" + currentTask.title + "» в архив?\nБезвозвратно удалить можно будет из архива.")) return;
+        await api("PATCH", "/api/tasks/" + currentTask.id, { status: "archived" });
+      } else {
+        if (!await cosConfirm("Удалить задачу «" + currentTask.title + "» БЕЗВОЗВРАТНО?")) return;
+        await api("DELETE", "/api/tasks/" + currentTask.id);
+      }
       closeDossier();
-      await reload("none");
+      await reload("relax");
     }
 
     // ── Пан / зум ──
