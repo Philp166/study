@@ -316,6 +316,7 @@
     </svg>`;
 
     function addBubble(role, text) {
+      document.body.classList.remove("voice-empty");
       const empty = transcriptEl.querySelector("#empty");
       if (empty) empty.remove();
 
@@ -357,15 +358,11 @@
     function renderTranscript() {
       transcriptEl.innerHTML = "";
       if (messages.length === 0) {
-        const empty = document.createElement("div");
-        empty.id = "empty";
-        const strong = document.createElement("strong");
-        strong.textContent = "ГОЛОС // CoS";
-        empty.appendChild(strong);
-        empty.appendChild(document.createTextNode("Нажми на микрофон и начни говорить свободно."));
-        transcriptEl.appendChild(empty);
+        // Один экран: транскрипт скрыт, единственный «герой» — контролы по центру.
+        document.body.classList.add("voice-empty");
         return;
       }
+      document.body.classList.remove("voice-empty");
       for (const m of messages) addBubble(m.role, m.content);
     }
 

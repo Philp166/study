@@ -509,6 +509,14 @@ body.voice-page .msg { max-width: 85%; }
   border-top: 1px solid var(--line);
 }
 
+/* Пустой голосовой чат = один центрированный экран:
+   прячем дублирующую заглушку транскрипта, контролы становятся героем по центру. */
+body.voice-empty #transcript { display: none; }
+body.voice-empty .controls {
+  flex: 1; justify-content: center;
+  border-top: 0; background: none;
+}
+
 .holo-container { position: relative; margin: 0 auto; }
 
 #status {
