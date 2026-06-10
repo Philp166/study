@@ -544,12 +544,28 @@ def api_memory_folders():
     return db.get_memory_folders()
 
 
-def _resolve_task_id(title) -> int | None:
-    """id активной задачи по названию (агент close/update задаёт title, не id)."""
+def _resolve_task_id(title, statuses: tuple = ("active",)) -> int | None:
+    """id задачи по названию (агент задаёт title, не id). По умолчанию ищем среди
+    активных (close/update); archive/delete ищут и среди завершённых."""
     t = (title or "").strip()
     if not t:
         return None
-    found = db.find_active_task_by_title(t)
+    found = db.find_task_by_title(t, statuses)
+    return found["id"] if found else None
+
+
+def _resolve_memory_id(title) -> int | None:
+    """id active-заметки по названию (для update_memory/delete_memory от агента).
+    Фолбэк: модель иногда копирует title с хвостом «(Папка)» из среза памяти —
+    при промахе пробуем без финальной скобочной группы."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    found = db.find_active_memory_by_title(t)
+    if found is None:
+        m = re.fullmatch(r"(.+?)\s*\([^()]*\)", t)
+        if m:
+            found = db.find_active_memory_by_title(m.group(1))
     return found["id"] if found else None
 
 
@@ -561,6 +577,7 @@ def _tool_result_msg(saved: dict) -> str:
         "merged": "дополнил существующую заметку",
         "duplicate": "заметка уже была записана",
         "updated": "обновил заметку",
+        "deleted": "удалил заметку",
     }.get(saved.get("memory_status"))
     if saved.get("memory") and mem_txt:
         parts.append(mem_txt)
@@ -568,13 +585,19 @@ def _tool_result_msg(saved: dict) -> str:
         "created": "создал задачу",
         "updated": "обновил задачу",
         "closed": "закрыл задачу",
+        "archived": "убрал задачу в архив",
+        "deleted": "удалил задачу",
     }.get(saved.get("task_status"))
     if saved.get("task") and task_txt:
         parts.append(task_txt)
     if parts:
         return "Готово: " + ", ".join(parts) + "."
     if saved.get("task_status") == "not_found":
-        return "Не нашёл активную задачу с таким названием — ничего не закрыл. Уточни название."
+        return ("Не нашёл задачу с таким названием — ничего не изменил. Уточни название "
+                "(точный title видно в срезе задач).")
+    if saved.get("memory_status") == "not_found":
+        return ("Не нашёл заметку с таким названием — ничего не изменил. Найди точный "
+                "заголовок через search_memory и повтори.")
     if saved.get("memory_status") == "title_exists":
         return "Заметку не записал — заголовок уже занят другой заметкой."
     return "Сохранять было нечего."
@@ -638,6 +661,24 @@ def _apply_suggestion(task, memory) -> dict:
                 saved["task_status"] = "closed"
             else:
                 saved["task_status"] = "not_found"
+        elif a == "archive":
+            # архивировать можно и активную, и завершённую задачу
+            tid = task.get("id") or _resolve_task_id(task.get("title"), ("active", "completed"))
+            if tid:
+                db.update_task(tid, status="archived")
+                saved["task"] = True
+                saved["task_status"] = "archived"
+            else:
+                saved["task_status"] = "not_found"
+        elif a == "delete":
+            tid = task.get("id") or _resolve_task_id(
+                task.get("title"), ("active", "completed", "archived"))
+            if tid:
+                db.delete_task(tid)
+                saved["task"] = True
+                saved["task_status"] = "deleted"
+            else:
+                saved["task_status"] = "not_found"
     if isinstance(memory, dict):
         a = memory.get("action")
         if a == "create" and (memory.get("title") or "").strip():
@@ -659,18 +700,48 @@ def _apply_suggestion(task, memory) -> dict:
                     saved["memory_status"] = how        # "merged" | "duplicate"
                 else:
                     saved["memory_status"] = "title_exists"
-        elif a == "update" and memory.get("id"):
-            fields = {}
-            if memory.get("content") is not None:
-                fields["content"] = memory["content"]
-            if (memory.get("title") or "").strip():
-                fields["title"] = memory["title"].strip()
-            if "folder" in memory:
-                fields["folder"] = _norm_folder(memory.get("folder"))
-            if fields:
-                db.update_memory(memory["id"], **fields)
-            saved["memory"] = True
-            saved["memory_status"] = "updated"
+        elif a == "update":
+            if memory.get("id"):
+                # старый формат (id известен): title/content — новые значения
+                fields = {}
+                if memory.get("content") is not None:
+                    fields["content"] = memory["content"]
+                if (memory.get("title") or "").strip():
+                    fields["title"] = memory["title"].strip()
+                if "folder" in memory:
+                    fields["folder"] = _norm_folder(memory.get("folder"))
+                if fields:
+                    db.update_memory(memory["id"], **fields)
+                saved["memory"] = True
+                saved["memory_status"] = "updated"
+            else:
+                # формат update_memory от агента: title — идентификатор существующей,
+                # новые значения — в content/new_title/folder
+                mid = _resolve_memory_id(memory.get("title"))
+                if mid is None:
+                    saved["memory_status"] = "not_found"
+                else:
+                    fields = {}
+                    if memory.get("content") is not None:
+                        fields["content"] = memory["content"]
+                    if (memory.get("new_title") or "").strip():
+                        fields["title"] = memory["new_title"].strip()
+                    if "folder" in memory:
+                        fields["folder"] = _norm_folder(memory.get("folder"))
+                    if fields:
+                        db.update_memory(mid, **fields)
+                        saved["memory"] = True
+                        saved["memory_status"] = "updated"
+                    # без изменяемых полей — нечего применять (status остаётся None)
+        elif a == "delete":
+            mid = memory.get("id") or _resolve_memory_id(memory.get("title"))
+            if mid is None:
+                saved["memory_status"] = "not_found"
+            else:
+                # мягкое удаление — как кнопка «Удалить» на /memory
+                db.update_memory(mid, status="inactive")
+                saved["memory"] = True
+                saved["memory_status"] = "deleted"
     return saved
 
 
@@ -836,7 +907,10 @@ def _stream_chat_response(chat_id: str, model: str,
             # autosave off: копим КАЖДЫЙ вызов отдельным пунктом одной карточки
             # подтверждения (раньше одиночные слоты схлопывали несколько записей).
             pending_items.append(sug)
-            return "Подготовил запись и показал пользователю карточку подтверждения."
+            return ("Изменение подготовлено, но ЕЩЁ НЕ применено: пользователю показана "
+                    "карточка подтверждения под твоим ответом. ЗАПРЕЩЕНО говорить "
+                    "«сохранил/записал/удалил/закрыл» — скажи, что ПОДГОТОВИЛ изменение "
+                    "и просишь подтвердить его карточкой.")
 
         full_text = ""
         try:
@@ -1082,8 +1156,9 @@ async def voice_chat_stream(req: VoiceChatRequest):
                 # устному «да» на следующей реплике (тумблер реально работает).
                 if req.chat_id:
                     _VOICE_PENDING.setdefault(req.chat_id, []).append(sug)
-                    return ("Подготовил запись, но пока НЕ сохранил. Переспроси у пользователя "
-                            "вслух «Сохранить это в память?» — применю после устного «да».")
+                    return ("Изменение подготовлено, но ЕЩЁ НЕ применено. ЗАПРЕЩЕНО говорить "
+                            "«сохранил/удалил» — переспроси у пользователя вслух «Сохранить "
+                            "это в память?» — применю после устного «да».")
                 return ("Без активного чата не могу отложить подтверждение голосом — "
                         "предложи сохранить в текстовом чате.")
             saved = _apply_suggestion(sug.get("task"), sug.get("memory"))

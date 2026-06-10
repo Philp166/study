@@ -1350,6 +1350,24 @@ def get_memory(memory_id: int) -> dict | None:
         return _fetchone(cur)
 
 
+def find_active_memory_by_title(title: str) -> dict | None:
+    """Active-заметка по нормализованному (trim+lower) title; свежайшая при
+    нескольких совпадениях. Нужно для update_memory/delete_memory по названию:
+    агент оперирует заголовками, а не id (зеркалит find_active_task_by_title)."""
+    norm = (title or "").strip().lower()
+    if not norm:
+        return None
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_MEMORY_COLS} FROM long_term_memory "
+            f"WHERE status='active' AND LOWER(TRIM(title))={_P} "
+            f"ORDER BY updated_at DESC, id DESC",
+            (norm,),
+        )
+        return _fetchone(cur)
+
+
 # ── Материализованный граф связей [[..]] (memory_links) ──
 
 def _parse_wikilink_titles(content: str) -> list[str]:
@@ -1715,23 +1733,30 @@ def get_task(task_id: int) -> dict | None:
         return _fetchone(cur)
 
 
-def find_active_task_by_title(title: str) -> dict | None:
-    """Активная задача по нормализованному (trim+lower) title; свежайшая, если
-    совпало несколько (по updated_at, затем id — детерминированно). Нужно для
-    close/update по названию: агент видит задачи в срезе по title, но не знает их
-    id. LOWER кросс-СУБД (SQLite — юникод-функция). NB: при двух активных задачах с
-    одинаковым нормализованным title close затронет только свежайшую."""
+def find_task_by_title(title: str, statuses: tuple = ("active",)) -> dict | None:
+    """Задача по нормализованному (trim+lower) title среди указанных статусов;
+    свежайшая, если совпало несколько (по updated_at, затем id — детерминированно).
+    Нужно для close/update/archive/delete по названию: агент видит задачи по title,
+    но не знает их id. LOWER кросс-СУБД (SQLite — юникод-функция). NB: при двух
+    задачах с одинаковым нормализованным title затронется только свежайшая."""
     norm = (title or "").strip().lower()
-    if not norm:
+    if not norm or not statuses:
         return None
+    placeholders = ",".join([_P] * len(statuses))
     with _connect() as conn:
         cur = _execute(
             conn,
-            f"SELECT * FROM tasks WHERE status='active' AND LOWER(TRIM(title))={_P} "
+            f"SELECT * FROM tasks WHERE status IN ({placeholders}) "
+            f"AND LOWER(TRIM(title))={_P} "
             f"ORDER BY updated_at DESC, id DESC",
-            (norm,),
+            (*statuses, norm),
         )
         return _fetchone(cur)
+
+
+def find_active_task_by_title(title: str) -> dict | None:
+    """Обёртка совместимости: активная задача по title (см. find_task_by_title)."""
+    return find_task_by_title(title, ("active",))
 
 
 def create_task(title: str, context: str = "") -> dict:

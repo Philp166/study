@@ -248,11 +248,125 @@ def test_apply_update_without_resolvable_target_is_noop(fresh_db):
 def test_tool_result_msg_honest():
     assert "закрыл задачу" in app._tool_result_msg(
         {"task": True, "task_status": "closed", "memory": False, "memory_status": None})
-    assert "не закрыл" in app._tool_result_msg(
+    assert "Не нашёл задачу" in app._tool_result_msg(
         {"task": False, "task_status": "not_found", "memory": False, "memory_status": None})
     assert app._tool_result_msg(
         {"task": False, "task_status": None, "memory": True, "memory_status": "merged"}
     ).startswith("Готово")
+
+
+# ── Блок 1 (ревью 2026-06-10): update/delete заметок, archive/delete задач ──
+
+def test_build_suggestion_update_memory_full():
+    sug = agent.build_suggestion("update_memory", {
+        "title": "Сервер", "new_content": "новый текст",
+        "new_title": "Прод-сервер", "folder": "Инфра"})
+    m = sug["memory"]
+    assert m["action"] == "update" and m["title"] == "Сервер"
+    assert m["content"] == "новый текст" and m["new_title"] == "Прод-сервер"
+    assert m["folder"] == "Инфра" and sug["task"] is None
+
+
+def test_build_suggestion_update_memory_requires_changes():
+    # без единого изменяемого поля предлагать нечего
+    assert agent.build_suggestion("update_memory", {"title": "Сервер"}) is None
+    assert agent.build_suggestion("update_memory", {"title": "Сервер", "new_content": "  "}) is None
+
+
+def test_build_suggestion_delete_and_archive_tools():
+    assert agent.build_suggestion("delete_memory", {"title": "X"})["memory"] == {
+        "action": "delete", "title": "X"}
+    assert agent.build_suggestion("archive_task", {"title": "T"})["task"] == {
+        "action": "archive", "title": "T"}
+    assert agent.build_suggestion("delete_task", {"title": "T"})["task"] == {
+        "action": "delete", "title": "T"}
+
+
+def test_apply_update_memory_by_title_replaces_content(fresh_db):
+    db.create_memory(title="Сервер", content="старый", folder="Инфра")
+    saved = app._apply_suggestion(None, {"action": "update", "title": " сервер ", "content": "новый"})
+    assert saved["memory"] is True and saved["memory_status"] == "updated"
+    note = db.find_active_memory_by_title("Сервер")
+    assert note["content"] == "новый"
+    assert note["folder"] == "Инфра"  # папку не трогали — осталась
+
+
+def test_apply_update_memory_rename_and_move(fresh_db):
+    n = db.create_memory(title="Сервер", content="x")
+    saved = app._apply_suggestion(None, {
+        "action": "update", "title": "Сервер", "new_title": "Прод", "folder": "Инфра"})
+    assert saved["memory_status"] == "updated"
+    note = db.get_memory(n["id"])
+    assert note["title"] == "Прод" and note["folder"] == "Инфра"
+
+
+def test_apply_update_memory_not_found(fresh_db):
+    saved = app._apply_suggestion(None, {"action": "update", "title": "Нет", "content": "x"})
+    assert saved["memory"] is False and saved["memory_status"] == "not_found"
+
+
+def test_apply_delete_memory_soft(fresh_db):
+    n = db.create_memory(title="Лишняя", content="x")
+    saved = app._apply_suggestion(None, {"action": "delete", "title": "лишняя"})
+    assert saved["memory"] is True and saved["memory_status"] == "deleted"
+    assert db.get_memory(n["id"])["status"] == "inactive"     # мягкое: строка жива
+    assert db.find_active_memory_by_title("Лишняя") is None   # из active ушла
+
+
+def test_apply_delete_memory_not_found(fresh_db):
+    saved = app._apply_suggestion(None, {"action": "delete", "title": "Нет"})
+    assert saved["memory"] is False and saved["memory_status"] == "not_found"
+
+
+def test_apply_archive_task_works_for_completed(fresh_db):
+    t = db.create_task(title="Чек-лист", context="")
+    db.update_task(t["id"], status="completed", outcome="готово")
+    saved = app._apply_suggestion({"action": "archive", "title": "чек-лист"}, None)
+    assert saved["task"] is True and saved["task_status"] == "archived"
+    assert db.get_task(t["id"])["status"] == "archived"
+
+
+def test_apply_delete_task_hard(fresh_db):
+    t = db.create_task(title="Мусор", context="")
+    saved = app._apply_suggestion({"action": "delete", "title": "Мусор"}, None)
+    assert saved["task"] is True and saved["task_status"] == "deleted"
+    assert db.get_task(t["id"]) is None
+
+
+def test_apply_archive_task_not_found(fresh_db):
+    saved = app._apply_suggestion({"action": "archive", "title": "Нет"}, None)
+    assert saved["task"] is False and saved["task_status"] == "not_found"
+
+
+def test_find_task_by_title_statuses(fresh_db):
+    t = db.create_task(title="Отчёт", context="")
+    db.update_task(t["id"], status="completed")
+    assert db.find_task_by_title("Отчёт") is None  # среди активных нет
+    assert db.find_task_by_title("Отчёт", ("active", "completed"))["id"] == t["id"]
+
+
+def test_find_active_memory_by_title_normalized(fresh_db):
+    n = db.create_memory(title="Прод-сервер", content="x")
+    assert db.find_active_memory_by_title("  прод-сервер ")["id"] == n["id"]
+    assert db.find_active_memory_by_title("нет такой") is None
+
+
+def test_resolve_memory_strips_folder_suffix(fresh_db):
+    # модель копирует «Title (Папка)» из среза памяти — резолвер должен пережить
+    n = db.create_memory(title="Пилотное ревью CoS", content="x", folder="Проекты")
+    assert app._resolve_memory_id("Пилотное ревью CoS (Проекты)") == n["id"]
+    # но заметка, у которой скобки — часть настоящего title, резолвится точно
+    m = db.create_memory(title="Отчёт (черновик)", content="y")
+    assert app._resolve_memory_id("Отчёт (черновик)") == m["id"]
+
+
+def test_tool_result_msg_new_statuses():
+    assert "удалил заметку" in app._tool_result_msg(
+        {"task": False, "task_status": None, "memory": True, "memory_status": "deleted"})
+    assert "архив" in app._tool_result_msg(
+        {"task": True, "task_status": "archived", "memory": False, "memory_status": None})
+    assert "Не нашёл заметку" in app._tool_result_msg(
+        {"task": False, "task_status": None, "memory": False, "memory_status": "not_found"})
 
 
 # ── Этап 2a: миграции (memory_links; projects/project_id оставлены инертными) ──

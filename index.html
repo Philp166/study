@@ -796,14 +796,17 @@
       let html = "";
       if (task) {
         const verb = task.action === "close" ? "Закрыть задачу"
-          : task.action === "update" ? "Обновить задачу" : "Задача";
+          : task.action === "update" ? "Обновить задачу"
+          : task.action === "archive" ? "Архивировать задачу"
+          : task.action === "delete" ? "Удалить задачу" : "Задача";
         const body = task.outcome || task.context || "";
         html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
           + _sugEsc(task.title || ("#" + (task.id || "")))
           + (body ? '<div class="mem-suggestion-body">' + _sugEsc(body) + '</div>' : '') + '</div>';
       }
       if (memory) {
-        const verb = memory.action === "update" ? "Обновить заметку" : "Память";
+        const verb = memory.action === "update" ? "Обновить заметку"
+          : memory.action === "delete" ? "Удалить заметку" : "Память";
         const folder = memory.folder ? ' → папка: ' + _sugEsc(memory.folder) : '';
         const body = memory.content || "";
         html += '<div class="mem-suggestion-item"><span class="mem-suggestion-tag">' + verb + '</span>'
@@ -819,7 +822,11 @@
       const host = bodies[bodies.length - 1];
       if (!host) return;
       const n = pendingSuggestion.length;
-      let html = '<div class="mem-suggestion-title">📝 Предлагаю сохранить' + (n > 1 ? ' (' + n + '):' : ':') + '</div>';
+      // среди пунктов может быть и удаление/архив — заголовок не должен врать «сохранить»
+      const onlySaves = pendingSuggestion.every((it) =>
+        (!it.task || ["create", "close", "update"].includes(it.task.action)) &&
+        (!it.memory || ["create", "update"].includes(it.memory.action)));
+      let html = '<div class="mem-suggestion-title">📝 ' + (onlySaves ? 'Предлагаю сохранить' : 'Предлагаю изменения памяти') + (n > 1 ? ' (' + n + '):' : ':') + '</div>';
       pendingSuggestion.forEach((it) => { html += _sugItemHtml(it); });
       const box = document.createElement("div");
       box.className = "mem-suggestion";
@@ -881,11 +888,14 @@
         merged: "дополнил заметку",
         duplicate: "заметка уже была записана",
         updated: "заметка обновлена",
+        deleted: "заметка удалена",
       }[saved.memory_status];
       const taskMsg = {
         created: "задача создана",
         updated: "задача обновлена",
         closed: "задача закрыта",
+        archived: "задача в архиве",
+        deleted: "задача удалена",
       }[saved.task_status];
       const parts = [];
       if (saved.task && taskMsg) parts.push(taskMsg);
@@ -896,6 +906,7 @@
         return msg;
       }
       if (saved.task_status === "not_found") return "⚠ Не нашёл задачу с таким названием";
+      if (saved.memory_status === "not_found") return "⚠ Не нашёл заметку с таким названием";
       return saved.memory_status === "title_exists"
         ? "⚠ Заметка с таким заголовком уже есть — не записал"
         : "⚠ Нечего было сохранять";

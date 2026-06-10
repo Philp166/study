@@ -312,7 +312,11 @@ def _render_memory_block(notes: list[dict], content_cap: int | None = None) -> s
     lines = ["\n\n# Долговременная память\n"]
     for n in notes:
         folder = n.get("folder")
-        head = f"\n## {n['title']} ({folder})" if folder else f"\n## {n['title']}"
+        # Папка — отдельной строкой, НЕ в заголовке: иначе модель копирует
+        # «Title (Папка)» как title в update/delete_memory и резолв ломается.
+        head = f"\n## {n['title']}"
+        if folder:
+            head += f"\nпапка: {folder}"
         content = n.get("content_preview") or ""
         if content_cap is not None:
             content = content[:content_cap]

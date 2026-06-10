@@ -218,11 +218,14 @@
         merged: "дополнил заметку",
         duplicate: "заметка уже была записана",
         updated: "заметка обновлена",
+        deleted: "заметка удалена",
       }[saved.memory_status];
       const taskMsg = {
         created: "задача создана",
         updated: "задача обновлена",
         closed: "задача закрыта",
+        archived: "задача в архиве",
+        deleted: "задача удалена",
       }[saved.task_status];
       const parts = [];
       if (saved.task && taskMsg) parts.push(taskMsg);
@@ -233,6 +236,7 @@
         return msg;
       }
       if (saved.task_status === "not_found") return "⚠ Не нашёл задачу с таким названием";
+      if (saved.memory_status === "not_found") return "⚠ Не нашёл заметку с таким названием";
       return saved.memory_status === "title_exists"
         ? "⚠ Заметка с таким заголовком уже есть — не записал"
         : "⚠ Нечего было сохранять";
