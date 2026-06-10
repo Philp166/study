@@ -145,6 +145,7 @@ app.add_middleware(
 )
 
 ALLOWED_MODELS = {
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
@@ -272,20 +273,6 @@ class ChatUpdateRequest(BaseModel):
     title: str | None = None
     pinned: bool | None = None
     model: str | None = None
-
-
-class MigrateChat(BaseModel):
-    id: str
-    title: str = ""
-    pinned: bool = False
-    model: str = DEFAULT_MODEL
-    createdAt: float
-    updatedAt: float
-    messages: list[Message] = []
-
-
-class MigrateRequest(BaseModel):
-    chats: list[MigrateChat]
 
 
 # ── Health-check (без пароля — пингует Render) ──
@@ -436,62 +423,6 @@ async def api_voices():
 @app.get("/api/token-stats/by-model")
 def api_token_stats_by_model():
     return db.get_usage_by_model()
-
-
-# ── Strategy Settings per-chat ──
-
-_STRATEGY_RANGES = {
-    "rolling_summary_threshold_pct": (5, 90),
-    "sliding_window_size": (5, 100),
-}
-_STRATEGY_BOOLS = {"rolling_summary_enabled", "sliding_window_enabled", "sticky_facts_enabled"}
-_STRATEGY_EXCLUSIVE = {"rolling_summary_enabled", "sliding_window_enabled", "sticky_facts_enabled"}
-
-
-@app.get("/api/chats/{chat_id}/strategy-settings")
-def api_get_strategy_settings(chat_id: str):
-    return db.get_strategy_settings(chat_id)
-
-
-@app.patch("/api/chats/{chat_id}/strategy-settings")
-def api_update_strategy_settings(chat_id: str, updates: dict):
-    clean = {}
-    for k, v in updates.items():
-        if k in _STRATEGY_BOOLS:
-            clean[k] = 1 if v else 0
-        elif k in _STRATEGY_RANGES:
-            lo, hi = _STRATEGY_RANGES[k]
-            try:
-                iv = int(v)
-            except (TypeError, ValueError):
-                continue
-            if iv < lo or iv > hi:
-                continue
-            clean[k] = iv
-    if not clean:
-        return db.get_strategy_settings(chat_id)
-
-    # Mutual exclusivity: enabling one strategy disables the others
-    for key in _STRATEGY_EXCLUSIVE:
-        if clean.get(key) == 1:
-            for other in _STRATEGY_EXCLUSIVE:
-                if other != key:
-                    clean[other] = 0
-            break
-
-    return db.update_strategy_settings(chat_id, **clean)
-
-
-@app.get("/api/chats/{chat_id}/facts")
-def api_get_facts(chat_id: str):
-    leaf = db.get_current_leaf(chat_id)
-    return db.get_active_facts(chat_id, leaf)
-
-
-@app.delete("/api/chats/{chat_id}/facts/{fact_id}")
-def api_delete_fact(chat_id: str, fact_id: int):
-    db.delete_chat_fact_by_id(fact_id)
-    return {"ok": True}
 
 
 # ── Долговременная память API ──
@@ -849,19 +780,6 @@ def api_update_task(task_id: int, body: dict):
 def api_delete_task(task_id: int):
     db.delete_task(task_id)
     return {"ok": True}
-
-
-@app.post("/api/migrate")
-def api_migrate(req: MigrateRequest):
-    for c in req.chats:
-        msgs = [{"role": m.role, "content": m.content} for m in c.messages]
-        db.import_chat(
-            chat_id=c.id, title=c.title, pinned=c.pinned,
-            model=c.model if c.model in ALLOWED_MODELS else DEFAULT_MODEL,
-            created_at=c.createdAt / 1000, updated_at=c.updatedAt / 1000,
-            messages=msgs,
-        )
-    return {"ok": True, "imported": len(req.chats)}
 
 
 # ── LLM Streaming (now with chat_id) ──

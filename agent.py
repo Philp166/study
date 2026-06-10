@@ -11,6 +11,7 @@ import anthropic
 
 
 MODEL_CONTEXT_WINDOWS = {
+    "claude-opus-4-8": 200_000,
     "claude-opus-4-7": 200_000,
     "claude-opus-4-6": 200_000,
     "claude-sonnet-4-6": 200_000,

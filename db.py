@@ -826,7 +826,7 @@ def get_chat(chat_id: str):
         return chat
 
 
-def create_chat(*, chat_id=None, title="", pinned=False, model="claude-sonnet-4-6",
+def create_chat(*, chat_id=None, title="", pinned=False, model="claude-opus-4-6",
                 created_at=None, updated_at=None):
     cid = chat_id or new_id()
     now = time.time()
@@ -1084,35 +1084,6 @@ def get_global_usage() -> dict:
         }
 
 
-# ── Migration (localStorage → server) ──
-
-def import_chat(chat_id: str, title: str, pinned: bool, model: str,
-                created_at: float, updated_at: float, messages: list[dict]):
-    insert_sql = (
-        f"INSERT INTO chats (id, title, pinned, model, created_at, updated_at) "
-        f"VALUES ({_P},{_P},{_P},{_P},{_P},{_P}) "
-    )
-    if _PG:
-        insert_sql += "ON CONFLICT (id) DO NOTHING"
-    else:
-        insert_sql = insert_sql.replace("INSERT INTO", "INSERT OR IGNORE INTO")
-
-    with _connect() as conn:
-        _execute(conn, insert_sql,
-                 (chat_id, title, int(pinned), model, created_at, updated_at))
-        parent = None
-        last_id = None
-        for m in messages:
-            last_id = _insert_message(conn, chat_id, m["role"], m["content"], updated_at, parent)
-            parent = last_id
-        if last_id is not None:
-            _execute(
-                conn,
-                f"UPDATE chats SET current_leaf_message_id={_P} WHERE id={_P}",
-                (last_id, chat_id),
-            )
-        conn.commit()
-
 
 # ── Settings (key-value) ──
 
@@ -1207,40 +1178,7 @@ def get_strategy_settings(chat_id: str) -> dict:
     return {"chat_id": chat_id, **_STRATEGY_DEFAULTS}
 
 
-def update_strategy_settings(chat_id: str, **fields) -> dict:
-    sets = []
-    vals = []
-    for k, v in fields.items():
-        if k not in _STRATEGY_FIELDS:
-            continue
-        sets.append(f"{k}={_P}")
-        vals.append(int(v))
-    if not sets:
-        return get_strategy_settings(chat_id)
-    vals.append(chat_id)
-    with _connect() as conn:
-        _execute(
-            conn,
-            f"UPDATE chat_strategy_settings SET {', '.join(sets)} WHERE chat_id={_P}",
-            vals,
-        )
-        conn.commit()
-    return get_strategy_settings(chat_id)
-
-
 # ── Chat Facts (branch-aware) ──
-
-def get_chat_facts(chat_id: str) -> list[dict]:
-    """ВСЕ факты чата (по всем веткам). Для UI активной ветки см. get_active_facts."""
-    with _connect() as conn:
-        cur = _execute(
-            conn,
-            f"SELECT id, key, value, branch_anchor_message_id, created_at, updated_at "
-            f"FROM chat_facts WHERE chat_id={_P} ORDER BY id",
-            (chat_id,),
-        )
-        return _fetchall(cur)
-
 
 def get_active_facts(chat_id: str, leaf_message_id: int | None) -> list[dict]:
     """Факты активной ветки: подъём от leaf к корню, по каждому ключу берётся
@@ -1301,12 +1239,6 @@ def update_chat_fact(chat_id: str, key: str, value: str, branch_anchor_message_i
 def tombstone_chat_fact(chat_id: str, key: str, branch_anchor_message_id: int):
     """Удаляет факт в текущей ветке через надгробие (не трогая предков/сиблингов)."""
     add_chat_fact(chat_id, key, FACT_TOMBSTONE, branch_anchor_message_id)
-
-
-def delete_chat_fact_by_id(fact_id: int):
-    with _connect() as conn:
-        _execute(conn, f"DELETE FROM chat_facts WHERE id={_P}", (fact_id,))
-        conn.commit()
 
 
 # ── Долговременная память (long_term_memory) ──
