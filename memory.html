@@ -36,15 +36,22 @@
     .main { position: relative; }
     #mem-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
     #mem-canvas.grabbing { cursor: grabbing; }
-    .mem-edge { stroke: var(--line-2); stroke-width: 1; opacity: .5; }
+    .mem-edge { stroke: var(--line-2); stroke-width: 1; opacity: .5; transition: opacity .25s, stroke .25s; }
     .mem-edge.dim { opacity: .08; }
     .mem-node { cursor: pointer; }
-    .mem-node circle { filter: drop-shadow(0 0 3px currentColor); transition: r .1s; }
+    .mem-node circle, .mem-node rect { filter: drop-shadow(0 0 3px currentColor); transition: opacity .25s; }
+    .mem-node circle { transition: r .1s, opacity .25s; }
     .mem-node:hover circle { r: 14; }
     .mem-label { font-family: var(--f-mono); font-size: 13px; fill: var(--ink-1); pointer-events: none; paint-order: stroke; stroke: rgba(5, 6, 20, .85); stroke-width: 3px; }
     .mem-node:hover .mem-label { fill: var(--ink-0); font-weight: 700; }
+    .mem-node, .mem-edge { transition: opacity .25s; }
     .mem-node.dim { opacity: .15; }
-    .mem-node.hit circle { stroke: var(--cyan); stroke-width: 3; }
+    .mem-node.hit circle, .mem-node.hit rect { stroke: var(--cyan); stroke-width: 3; }
+    .mem-node.task-completed { opacity: .55; }
+    /* hover-фокус: гасим всё, кроме ноды, её соседей и их рёбер */
+    #mem-canvas.focus-mode .mem-node:not(.hl) { opacity: .15; }
+    #mem-canvas.focus-mode .mem-edge:not(.hl) { opacity: .06; }
+    #mem-canvas.focus-mode .mem-edge.hl { opacity: .9; stroke: var(--cyan); }
     .mem-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ink-2); font-family: var(--f-mono); font-size: 13px; pointer-events: none; }
     .mem-empty[hidden] { display: none; }
 
@@ -73,6 +80,9 @@
     .mem-link { color: var(--cyan); cursor: pointer; text-shadow: 0 0 6px rgba(0, 240, 255, .4); }
     .mem-link:hover { text-decoration: underline; }
     .mem-link.missing { color: var(--magenta); cursor: default; text-shadow: none; opacity: .7; }
+    .mem-backlinks { display: flex; flex-wrap: wrap; gap: 6px; }
+    .mem-backlink { font-family: var(--f-mono); font-size: 11px; color: var(--cyan); border: 1px solid var(--line-2); padding: 3px 8px; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+    .mem-backlink:hover { border-color: var(--cyan); box-shadow: 0 0 10px rgba(0, 240, 255, .2); }
     .dossier-dates { font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-2); line-height: 1.7; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 6px; }
     .dossier-actions { display: flex; gap: 8px; margin-top: 8px; }
     .dossier-actions .btn { flex: 1; justify-content: center; }
@@ -154,6 +164,8 @@
 
     // ── Цвет папки: автоген из хеша имени; без папки (null) — серый ──
     const NO_FOLDER_COLOR = "#6e74a8";
+    const TASK_ACTIVE_COLOR = "#ffc14d";     // активная задача — янтарный ромб
+    const TASK_DONE_COLOR = "#6e74a8";       // завершённая — приглушённый
     function folderColor(name) {
       if (!name) return NO_FOLDER_COLOR;
       let hash = 0;
@@ -163,16 +175,54 @@
     }
 
     // ── Поле и параметры layout ──
-    const W = 1200, H = 800, NODE_R = 10, K_CAT = 0.05;
+    const W = 1200, H = 800, NODE_R = 10;
+    const K_CAT = 0.22;        // притяжение к центроиду своей группы (папки)
+    const K_GRAV = 0.06;       // гравитация к центру поля: не даёт компонентам разлетаться
+    const K_REP = 0.55;        // множитель идеальной дистанции отталкивания: <0.9,
+                               // чтобы равновесие умещалось внутри рамки, а не на стенках
+    const FULL_ITERS = 150, RELAX_ITERS = 40, ITERS_PER_FRAME = 3;
+    const TASK_GROUP = "__tasks__";        // группа задач для центроида (не имя папки)
+
+    // Поле растёт с числом нод (площадь ~ n), но остаётся ОГРАНИЧЕННЫМ: позиции
+    // зажимаются рамкой (классический Fruchterman–Reingold). Без рамки несвязанные
+    // компоненты разлетаются на тысячи единиц — ломается масштаб и читаемость.
+    let fieldW = W, fieldH = H;
+    function updateField() {
+      const f = Math.max(1, Math.sqrt(simNodes().length / 16));
+      fieldW = W * f; fieldH = H * f;
+    }
+    function clampPos(p) {
+      p.x = Math.min(Math.max(p.x, NODE_R), fieldW - NODE_R);
+      p.y = Math.min(Math.max(p.y, NODE_R), fieldH - NODE_R);
+    }
+
+    // ── Детерминированный рандом: одинаковая раскладка между визитами/устройствами ──
+    function hashStr(s) {
+      let h = 2166136261 >>> 0;
+      for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+      return h >>> 0;
+    }
+    function mulberry32(a) {
+      return function () {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    function seededStart(key) {
+      const r = mulberry32(hashStr("cos-" + key));
+      return { x: fieldW / 2 + (r() - 0.5) * fieldW * 0.8, y: fieldH / 2 + (r() - 0.5) * fieldH * 0.8 };
+    }
 
     // ── Состояние ──
     let notes = [], links = [], tasks = [], folders = [];
-    let pos = {};                              // id -> {x, y}
+    let pos = {};                              // key -> {x, y}; заметки "id", задачи "t<id>"
     let vb = { x: 0, y: 0, w: W, h: H };       // viewBox
     let activeFolder;                          // undefined=нет фильтра, null="Без папки", строка=папка
     let searchQuery = "";
     let currentNote = null, currentTask = null;
-    let moved = 0, tweenRAF = null;
+    let moved = 0, tweenRAF = null, layoutRAF = null;
     const expanded = new Set();
     const localFolders = new Set();            // папки, созданные кнопкой, ещё без заметок
 
@@ -205,86 +255,139 @@
       if (!sec) return "—";
       return new Date(sec * 1000).toLocaleString("ru-RU");
     }
+    const normTitle = (s) => (s || "").split("|")[0].trim().toLowerCase();
 
-    // ── Рёбра по [[wiki-ссылкам]]: target_id != null, оба конца активны, без дублей и петель ──
+    // ── Узлы графа: заметки + задачи (active/completed; archived — только сайдбар) ──
+    const graphTasks = () => tasks.filter((t) => t.status === "active" || t.status === "completed");
+    function simNodes() {
+      const arr = notes.map((n) => ({ key: String(n.id), group: n.folder || "", type: "note", data: n }));
+      graphTasks().forEach((t) => arr.push({ key: "t" + t.id, group: TASK_GROUP, type: "task", data: t }));
+      return arr;
+    }
+
+    // ── Рёбра: заметка↔заметка из memory_links; задача→заметка из [[..]] в context ──
+    const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
     function edgePairs() {
       const ids = new Set(notes.map((n) => String(n.id)));
+      const byTitle = new Map(notes.map((n) => [normTitle(n.title), String(n.id)]));
       const seen = new Set(), out = [];
-      links.forEach((l) => {
-        if (l.target_id == null) return;
-        const a = String(l.source_id), b = String(l.target_id);
-        if (a === b || !ids.has(a) || !ids.has(b)) return;
+      const push = (a, b) => {
+        if (a === b) return;
         const key = a < b ? a + "-" + b : b + "-" + a;
         if (seen.has(key)) return;
         seen.add(key);
         out.push([a, b]);
+      };
+      links.forEach((l) => {
+        if (l.target_id == null) return;
+        const a = String(l.source_id), b = String(l.target_id);
+        if (!ids.has(a) || !ids.has(b)) return;
+        push(a, b);
+      });
+      graphTasks().forEach((t) => {
+        const text = (t.context || "") + " " + (t.outcome || "");
+        for (const m of text.matchAll(WIKILINK_RE)) {
+          const target = byTitle.get(normTitle(m[1]));
+          if (target) push("t" + t.id, target);
+        }
       });
       return out;
     }
 
-    // ── Force-layout (Fruchterman–Reingold + притяжение по категории) ──
-    function relax(iters) {
-      const n = notes.length;
+    // ── Force-layout: Fruchterman–Reingold + центроиды групп + гравитация к центру ──
+    // Одна итерация при температуре temp; вызывается из runLayout (анимация по rAF).
+    function relaxStep(nodesArr, edges, temp) {
+      const n = nodesArr.length;
       if (n === 0) return;
-      const k = 0.9 * Math.sqrt((W * H) / n);
-      let temp = W * 0.10;
-      const edges = edgePairs();
-      for (let it = 0; it < iters; it++) {
-        const disp = {};
-        notes.forEach((nd) => (disp[nd.id] = { x: 0, y: 0 }));
+      const k = K_REP * Math.sqrt((fieldW * fieldH) / n);
+      const disp = {};
+      nodesArr.forEach((nd) => (disp[nd.key] = { x: 0, y: 0 }));
 
-        // отталкивание всех пар: f = k^2 / d
-        for (let i = 0; i < n; i++) {
-          for (let j = i + 1; j < n; j++) {
-            const a = notes[i].id, b = notes[j].id;
-            let dx = pos[a].x - pos[b].x, dy = pos[a].y - pos[b].y;
-            let d = Math.hypot(dx, dy) || 0.01;
-            const f = (k * k) / d, ux = dx / d, uy = dy / d;
-            disp[a].x += ux * f; disp[a].y += uy * f;
-            disp[b].x -= ux * f; disp[b].y -= uy * f;
-          }
-        }
-        // притяжение по рёбрам: f = d^2 / k
-        for (const [a, b] of edges) {
-          if (!pos[a] || !pos[b]) continue;
+      // отталкивание пар: f = k^2/d, но только ЛОКАЛЬНОЕ (d < cutoff) — дальние
+      // компоненты не расталкивают друг друга через всё поле (иначе всё липнет к рамке)
+      const cutoff = 2.2 * k;
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const a = nodesArr[i].key, b = nodesArr[j].key;
           let dx = pos[a].x - pos[b].x, dy = pos[a].y - pos[b].y;
           let d = Math.hypot(dx, dy) || 0.01;
-          const f = (d * d) / k, ux = dx / d, uy = dy / d;
-          disp[a].x -= ux * f; disp[a].y -= uy * f;
-          disp[b].x += ux * f; disp[b].y += uy * f;
+          if (d > cutoff) continue;
+          const f = (k * k) / d, ux = dx / d, uy = dy / d;
+          disp[a].x += ux * f; disp[a].y += uy * f;
+          disp[b].x -= ux * f; disp[b].y -= uy * f;
         }
-        // притяжение к центроиду своей папки (null-папка группируется отдельно)
-        const cent = {}, cnt = {};
-        notes.forEach((nd) => {
-          const c = nd.folder || "";
-          if (!cent[c]) { cent[c] = { x: 0, y: 0 }; cnt[c] = 0; }
-          cent[c].x += pos[nd.id].x; cent[c].y += pos[nd.id].y; cnt[c]++;
-        });
-        for (const c in cent) { cent[c].x /= cnt[c]; cent[c].y /= cnt[c]; }
-        notes.forEach((nd) => {
-          const c = nd.folder || "";
-          disp[nd.id].x += (cent[c].x - pos[nd.id].x) * K_CAT;
-          disp[nd.id].y += (cent[c].y - pos[nd.id].y) * K_CAT;
-        });
-        // сдвиг с ограничением шага (остывание)
-        notes.forEach((nd) => {
-          const dp = disp[nd.id], dl = Math.hypot(dp.x, dp.y) || 0.01;
-          const s = Math.min(dl, temp);
-          pos[nd.id].x += (dp.x / dl) * s;
-          pos[nd.id].y += (dp.y / dl) * s;
-        });
-        temp *= 0.95;
       }
+      // притяжение по рёбрам: f = d^2 / k
+      for (const [a, b] of edges) {
+        if (!pos[a] || !pos[b]) continue;
+        let dx = pos[a].x - pos[b].x, dy = pos[a].y - pos[b].y;
+        let d = Math.hypot(dx, dy) || 0.01;
+        const f = (d * d) / k, ux = dx / d, uy = dy / d;
+        disp[a].x -= ux * f; disp[a].y -= uy * f;
+        disp[b].x += ux * f; disp[b].y += uy * f;
+      }
+      // притяжение к центроиду своей группы (папка / задачи / «без папки»)
+      const cent = {}, cnt = {};
+      nodesArr.forEach((nd) => {
+        const c = nd.group;
+        if (!cent[c]) { cent[c] = { x: 0, y: 0 }; cnt[c] = 0; }
+        cent[c].x += pos[nd.key].x; cent[c].y += pos[nd.key].y; cnt[c]++;
+      });
+      for (const c in cent) { cent[c].x /= cnt[c]; cent[c].y /= cnt[c]; }
+      nodesArr.forEach((nd) => {
+        const c = nd.group;
+        disp[nd.key].x += (cent[c].x - pos[nd.key].x) * K_CAT;
+        disp[nd.key].y += (cent[c].y - pos[nd.key].y) * K_CAT;
+      });
+      // гравитация к центру поля: изолированные ноды и чужие компоненты не разлетаются
+      nodesArr.forEach((nd) => {
+        disp[nd.key].x += (fieldW / 2 - pos[nd.key].x) * K_GRAV;
+        disp[nd.key].y += (fieldH / 2 - pos[nd.key].y) * K_GRAV;
+      });
+      // сдвиг с ограничением шага (остывание) + зажим рамкой поля
+      nodesArr.forEach((nd) => {
+        const dp = disp[nd.key], dl = Math.hypot(dp.x, dp.y) || 0.01;
+        const s = Math.min(dl, temp);
+        pos[nd.key].x += (dp.x / dl) * s;
+        pos[nd.key].y += (dp.y / dl) * s;
+        clampPos(pos[nd.key]);
+      });
+    }
+
+    // Анимированный прогон лейаута: ITERS_PER_FRAME итераций на кадр, живое
+    // «устаканивание» вместо телепортации одним кадром. В конце — fit камеры.
+    function runLayout(iters, { fitAtEnd = true } = {}) {
+      if (layoutRAF) cancelAnimationFrame(layoutRAF);
+      const nodesArr = simNodes();
+      const edges = edgePairs();
+      let it = 0;
+      let temp = W * 0.10;
+      function frame() {
+        for (let s = 0; s < ITERS_PER_FRAME && it < iters; s++, it++) {
+          relaxStep(nodesArr, edges, temp);
+          temp *= 0.95;
+        }
+        updatePositions();
+        if (it < iters) {
+          layoutRAF = requestAnimationFrame(frame);
+        } else {
+          layoutRAF = null;
+          if (fitAtEnd) fitAll(true);
+        }
+      }
+      layoutRAF = requestAnimationFrame(frame);
     }
 
     function startPos(nd) {
-      const same = notes.filter((n) => (n.folder || null) === (nd.folder || null) && pos[n.id]);
+      // новая нода стартует у центроида своей группы (если группа уже на поле)
+      const same = simNodes().filter((o) => o.group === nd.group && o.key !== nd.key && pos[o.key]);
       if (same.length) {
-        const cx = same.reduce((s, n) => s + pos[n.id].x, 0) / same.length;
-        const cy = same.reduce((s, n) => s + pos[n.id].y, 0) / same.length;
-        return { x: cx + (Math.random() - 0.5) * 80, y: cy + (Math.random() - 0.5) * 80 };
+        const cx = same.reduce((s, o) => s + pos[o.key].x, 0) / same.length;
+        const cy = same.reduce((s, o) => s + pos[o.key].y, 0) / same.length;
+        const r = mulberry32(hashStr("cos-" + nd.key));
+        return { x: cx + (r() - 0.5) * 80, y: cy + (r() - 0.5) * 80 };
       }
-      return { x: W / 2 + (Math.random() - 0.5) * 120, y: H / 2 + (Math.random() - 0.5) * 120 };
+      return seededStart(nd.key);
     }
 
     // ── viewBox / камера ──
@@ -318,17 +421,18 @@
       const target = { x: cx - w / 2, y: cy - h / 2, w, h };
       if (tween) tweenTo(target, 320); else { vb = target; setViewBox(); }
     }
-    const fitAll = (tween) => fitTo(notes.map((n) => pos[n.id]).filter(Boolean), tween);
+    const fitAll = (tween) => fitTo(simNodes().map((nd) => pos[nd.key]).filter(Boolean), tween);
 
     // ── Фокус по категории / поиск ──
-    const matches = (nd) => ((nd.title || "") + " " + (nd.content || "")).toLowerCase().includes(searchQuery);
+    const noteMatches = (nd) => ((nd.title || "") + " " + (nd.content || "")).toLowerCase().includes(searchQuery);
+    const taskMatches = (t) => ((t.title || "") + " " + (t.context || "")).toLowerCase().includes(searchQuery);
     // val: строка (папка) или null ("Без папки"). Повторный клик снимает фильтр.
     function focusFolder(val) {
       activeFolder = activeFolder === val ? undefined : val;
       renderSidebar();
-      render();
+      applyFilters();
       if (activeFolder !== undefined) {
-        const ps = notes.filter((n) => (n.folder || null) === activeFolder).map((n) => pos[n.id]).filter(Boolean);
+        const ps = notes.filter((n) => (n.folder || null) === activeFolder).map((n) => pos[String(n.id)]).filter(Boolean);
         if (ps.length) fitTo(ps, true);
       } else {
         fitAll(true);
@@ -336,43 +440,107 @@
       closeSidebar();
     }
 
-    // ── Рендер канваса ──
-    function render() {
+    // ── Сцена: элементы создаются один раз (buildScene), позиции/классы обновляются
+    //    отдельно — так работают CSS-переходы и анимация лейаута без пересборки DOM ──
+    let nodeEls = new Map();   // key -> <g>
+    let edgeEls = [];          // [{el, a, b}]
+    let adjacency = new Map(); // key -> Set(key)
+
+    function buildScene() {
       edgesG.textContent = "";
       nodesG.textContent = "";
-      const isDim = (nd) => (activeFolder !== undefined && (nd.folder || null) !== activeFolder) || (searchQuery && !matches(nd));
-      const isHit = (nd) => searchQuery && matches(nd);
+      nodeEls.clear();
+      edgeEls = [];
+      adjacency = new Map();
 
       edgePairs().forEach(([a, b]) => {
-        if (!pos[a] || !pos[b]) return;
-        const na = noteById(a), nb = noteById(b);
-        const dim = (na && isDim(na)) || (nb && isDim(nb));
-        edgesG.appendChild(el("line", {
-          x1: pos[a].x, y1: pos[a].y, x2: pos[b].x, y2: pos[b].y,
-          class: "mem-edge" + (dim ? " dim" : ""), "vector-effect": "non-scaling-stroke",
-        }));
+        const ln = el("line", { class: "mem-edge", "vector-effect": "non-scaling-stroke" });
+        edgesG.appendChild(ln);
+        edgeEls.push({ el: ln, a, b });
+        if (!adjacency.has(a)) adjacency.set(a, new Set());
+        if (!adjacency.has(b)) adjacency.set(b, new Set());
+        adjacency.get(a).add(b);
+        adjacency.get(b).add(a);
       });
 
-      notes.forEach((nd) => {
-        const p = pos[nd.id];
-        if (!p) return;
-        const color = folderColor(nd.folder);
-        const g = el("g", {
-          class: "mem-node" + (isDim(nd) ? " dim" : "") + (isHit(nd) ? " hit" : ""),
-          transform: "translate(" + p.x + "," + p.y + ")",
-        });
-        g.dataset.id = nd.id;
-        const c = el("circle", { r: NODE_R, fill: color, style: "color:" + color });
-        const t = el("text", { x: NODE_R + 5, y: 4, class: "mem-label" });
-        t.textContent = nd.title;
-        g.appendChild(c);
+      simNodes().forEach((nd) => {
+        const g = el("g", { class: "mem-node" + (nd.type === "task" && nd.data.status === "completed" ? " task-completed" : "") });
+        g.dataset.key = nd.key;
+        if (nd.type === "note") {
+          const color = folderColor(nd.data.folder);
+          g.appendChild(el("circle", { r: NODE_R, fill: color, style: "color:" + color }));
+        } else {
+          const color = nd.data.status === "active" ? TASK_ACTIVE_COLOR : TASK_DONE_COLOR;
+          // ромб = повёрнутый квадрат: визуально отличает задачу от заметки
+          g.appendChild(el("rect", {
+            x: -NODE_R, y: -NODE_R, width: NODE_R * 2, height: NODE_R * 2,
+            transform: "rotate(45)", fill: color, style: "color:" + color,
+          }));
+        }
+        const t = el("text", { x: NODE_R + 7, y: 4, class: "mem-label" });
+        t.textContent = nd.data.title;
         g.appendChild(t);
-        g.addEventListener("click", (ev) => { ev.stopPropagation(); if (moved < 4) openNote(nd.id); });
+        g.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (moved >= 4) return;
+          if (nd.type === "note") openNote(nd.data.id); else openTask(nd.data);
+        });
+        g.addEventListener("mouseenter", () => highlightNeighbors(nd.key));
+        g.addEventListener("mouseleave", clearHighlight);
         nodesG.appendChild(g);
+        nodeEls.set(nd.key, g);
+      });
+
+      applyFilters();
+      updatePositions();
+    }
+
+    function updatePositions() {
+      edgeEls.forEach(({ el: ln, a, b }) => {
+        if (!pos[a] || !pos[b]) return;
+        ln.setAttribute("x1", pos[a].x); ln.setAttribute("y1", pos[a].y);
+        ln.setAttribute("x2", pos[b].x); ln.setAttribute("y2", pos[b].y);
+      });
+      nodeEls.forEach((g, key) => {
+        if (pos[key]) g.setAttribute("transform", "translate(" + pos[key].x + "," + pos[key].y + ")");
       });
     }
 
-    function updateEmpty() { emptyEl.hidden = notes.length > 0; }
+    // dim/hit без пересборки сцены (поиск, фильтр папки)
+    function applyFilters() {
+      simNodes().forEach((nd) => {
+        const g = nodeEls.get(nd.key);
+        if (!g) return;
+        let dim = false, hit = false;
+        if (nd.type === "note") {
+          dim = (activeFolder !== undefined && (nd.data.folder || null) !== activeFolder) ||
+                (searchQuery && !noteMatches(nd.data));
+          hit = !!searchQuery && noteMatches(nd.data);
+        } else {
+          dim = (activeFolder !== undefined) || (searchQuery && !taskMatches(nd.data));
+          hit = !!searchQuery && taskMatches(nd.data);
+        }
+        g.classList.toggle("dim", !!dim);
+        g.classList.toggle("hit", hit);
+      });
+      const dimmed = new Set([...nodeEls.entries()].filter(([, g]) => g.classList.contains("dim")).map(([k]) => k));
+      edgeEls.forEach(({ el: ln, a, b }) => ln.classList.toggle("dim", dimmed.has(a) || dimmed.has(b)));
+    }
+
+    // hover: подсветить ноду, соседей и рёбра между ними, остальное притушить
+    function highlightNeighbors(key) {
+      const nbrs = adjacency.get(key) || new Set();
+      svg.classList.add("focus-mode");
+      nodeEls.forEach((g, k) => g.classList.toggle("hl", k === key || nbrs.has(k)));
+      edgeEls.forEach(({ el: ln, a, b }) => ln.classList.toggle("hl", a === key || b === key));
+    }
+    function clearHighlight() {
+      svg.classList.remove("focus-mode");
+      nodeEls.forEach((g) => g.classList.remove("hl"));
+      edgeEls.forEach(({ el: ln }) => ln.classList.remove("hl"));
+    }
+
+    function updateEmpty() { emptyEl.hidden = notes.length > 0 || graphTasks().length > 0; }
 
     // ── Рендер сайдбара ──
     function renderSidebar() {
@@ -408,7 +576,7 @@
       foldersEl.appendChild(root);
 
       tasksEl.textContent = "";
-      [["active", "Tasks — active"], ["completed", "Tasks — completed"]].forEach(([st, label]) => {
+      [["active", "Tasks — active"], ["completed", "Tasks — completed"], ["archived", "Архив"]].forEach(([st, label]) => {
         const list = tasks.filter((t) => t.status === st);
         const f = document.createElement("div");
         f.className = "mem-folder";
@@ -448,22 +616,22 @@
       tasks = Array.isArray(t) ? t : [];
       folders = Array.isArray(f) ? f : [];
     }
-    // mode: 'full' (рандом + 150 итераций), 'relax' (40 итераций от текущих),
-    //       'none' (без пересчёта позиций)
+    // mode: 'full' (детерминированный пересчёт, FULL_ITERS), 'relax' (короткая
+    //       дорелаксация от текущих позиций), 'none' (без пересчёта позиций)
     async function reload(mode) {
       await fetchData();
-      Object.keys(pos).forEach((id) => { if (!noteById(id)) delete pos[id]; });
+      updateField();
+      const alive = new Set(simNodes().map((nd) => nd.key));
+      Object.keys(pos).forEach((key) => { if (!alive.has(key)) delete pos[key]; });
       if (mode === "full") pos = {};
-      notes.forEach((nd) => {
-        if (!pos[nd.id]) pos[nd.id] = mode === "full"
-          ? { x: Math.random() * W, y: Math.random() * H }
-          : startPos(nd);
+      simNodes().forEach((nd) => {
+        if (!pos[nd.key]) pos[nd.key] = mode === "full" ? seededStart(nd.key) : startPos(nd);
       });
-      if (mode === "full") relax(150);
-      else if (mode === "relax") relax(40);
-      render();
+      buildScene();
       renderSidebar();
       updateEmpty();
+      if (mode === "full") runLayout(FULL_ITERS);
+      else if (mode === "relax") runLayout(RELAX_ITERS, { fitAtEnd: false });
     }
 
     // ── Досье ──
@@ -482,6 +650,19 @@
         .replace(/\n/g, "<br>");
     }
 
+    // кто ссылается на заметку: из materialized links (для чипов «Сюда ссылаются»)
+    function backlinksFor(noteId) {
+      const seen = new Set(), out = [];
+      links.forEach((l) => {
+        if (l.target_id == null || String(l.target_id) !== String(noteId)) return;
+        if (seen.has(l.source_id)) return;
+        seen.add(l.source_id);
+        const src = noteById(l.source_id);
+        if (src) out.push(src);
+      });
+      return out;
+    }
+
     function openNote(id) {
       const note = id == null ? null : noteById(id);
       currentNote = note;
@@ -490,11 +671,17 @@
       const folderVal = note && note.folder ? note.folder : "";
       const known = [...new Set([...folders, ...localFolders])].sort((a, b) => a.localeCompare(b, "ru"));
       const dlOpts = known.map((f) => '<option value="' + escapeAttr(f) + '"></option>').join("");
+      const backs = note ? backlinksFor(note.id) : [];
       dossierBody.innerHTML =
         '<div class="dossier-field"><label>Заголовок</label><input id="d-title" type="text" value="' + (note ? escapeAttr(note.title) : "") + '"></div>' +
         '<div class="dossier-field"><label>Папка</label><input id="d-folder" type="text" list="folder-options" placeholder="(без папки)" value="' + escapeAttr(folderVal) + '"><datalist id="folder-options">' + dlOpts + "</datalist></div>" +
         '<div class="dossier-field"><label>Содержимое (markdown, [[ссылки]])</label><textarea id="d-content">' + (note ? escapeHtml(note.content) : "") + "</textarea></div>" +
         '<div class="dossier-field"><label>Предпросмотр</label><div id="d-preview" class="mem-preview"></div></div>' +
+        (backs.length
+          ? '<div class="dossier-field"><label>Сюда ссылаются</label><div class="mem-backlinks">' +
+            backs.map((b) => '<span class="mem-backlink" data-id="' + b.id + '">' + escapeHtml(b.title) + "</span>").join("") +
+            "</div></div>"
+          : "") +
         '<div class="dossier-actions"><button id="d-save" class="btn btn-primary">' + (note ? "Сохранить" : "Создать") + "</button>" +
         (note ? '<button id="d-del" class="btn btn-danger">Удалить</button>' : "") + "</div>" +
         (note ? '<div class="dossier-dates">Создано: ' + fmt(note.created_at) + "<br>Обновлено: " + fmt(note.updated_at) + "</div>" : "");
@@ -506,6 +693,9 @@
       prev.addEventListener("click", (ev) => {
         const a = ev.target.closest(".mem-link");
         if (a && a.dataset.id) openNote(Number(a.dataset.id));
+      });
+      dossierBody.querySelectorAll(".mem-backlink").forEach((chip) => {
+        chip.addEventListener("click", () => openNote(Number(chip.dataset.id)));
       });
       byId("d-save").addEventListener("click", saveNote);
       if (note) byId("d-del").addEventListener("click", deleteNote);
@@ -522,6 +712,7 @@
         '<div class="dossier-field"><label>Заголовок</label><input id="t-title" type="text" value="' + escapeAttr(t.title) + '"></div>' +
         '<div class="dossier-field"><label>Статус</label><select id="t-status">' + sopts + "</select></div>" +
         '<div class="dossier-field"><label>Контекст</label><textarea id="t-context">' + escapeHtml(t.context) + "</textarea></div>" +
+        '<div class="dossier-field"><label>Предпросмотр</label><div id="t-preview" class="mem-preview"></div></div>' +
         '<div class="dossier-field" id="t-outcome-wrap"><label>Итог</label><textarea id="t-outcome">' + escapeHtml(t.outcome) + "</textarea></div>" +
         '<div class="dossier-actions"><button id="t-save" class="btn btn-primary">Сохранить</button>' +
         '<button id="t-del" class="btn btn-danger">Удалить</button></div>' +
@@ -531,6 +722,15 @@
       const toggle = () => { wrap.style.display = statusEl.value === "active" ? "none" : "block"; };
       statusEl.addEventListener("change", toggle);
       toggle();
+      // [[ссылки]] в контексте задачи — кликабельный предпросмотр, как у заметок
+      const ctxEl = byId("t-context"), tPrev = byId("t-preview");
+      const updT = () => { tPrev.innerHTML = renderPreview(ctxEl.value); };
+      ctxEl.addEventListener("input", updT);
+      updT();
+      tPrev.addEventListener("click", (ev) => {
+        const a = ev.target.closest(".mem-link");
+        if (a && a.dataset.id) openNote(Number(a.dataset.id));
+      });
       byId("t-save").addEventListener("click", saveTask);
       byId("t-del").addEventListener("click", deleteTask);
       closeSidebar();
@@ -571,9 +771,7 @@
       const r = await api("PATCH", "/api/tasks/" + currentTask.id, payload);
       if (r && r.error) { alert("Ошибка: " + r.error); return; }
       closeDossier();
-      tasks = await api("GET", "/api/tasks");
-      if (!Array.isArray(tasks)) tasks = [];
-      renderSidebar();
+      await reload("relax");   // статус/контекст задачи меняют граф (узлы/рёбра)
     }
 
     async function deleteTask() {
@@ -581,9 +779,7 @@
       if (!confirm("Удалить задачу «" + currentTask.title + "»?")) return;
       await api("DELETE", "/api/tasks/" + currentTask.id);
       closeDossier();
-      tasks = await api("GET", "/api/tasks");
-      if (!Array.isArray(tasks)) tasks = [];
-      renderSidebar();
+      await reload("none");
     }
 
     // ── Пан / зум ──
@@ -618,7 +814,7 @@
     }, { passive: false });
 
     // ── Прочие обработчики ──
-    searchEl.addEventListener("input", () => { searchQuery = searchEl.value.trim().toLowerCase(); render(); });
+    searchEl.addEventListener("input", () => { searchQuery = searchEl.value.trim().toLowerCase(); applyFilters(); });
     byId("mem-new").addEventListener("click", () => { closeSidebar(); openNote(null); });
     byId("mem-new-folder").addEventListener("click", () => {
       const name = (prompt("Имя новой папки:") || "").trim();
