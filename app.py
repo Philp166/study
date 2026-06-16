@@ -534,6 +534,8 @@ def _tool_result_msg(saved: dict) -> str:
                 "заголовок через search_memory и повтори.")
     if saved.get("memory_status") == "title_exists":
         return "Заметку не записал — заголовок уже занят другой заметкой."
+    if saved.get("memory_status") == "profile_protected":
+        return "Заметку профиля удалять нельзя — её можно только редактировать."
     return "Сохранять было нечего."
 
 
@@ -678,6 +680,9 @@ def _apply_suggestion(task, memory) -> dict:
             mid = memory.get("id") or _resolve_memory_id(memory.get("title"))
             if mid is None:
                 saved["memory_status"] = "not_found"
+            elif db.is_profile_note(mid):
+                # Профиль удалять нельзя (защита и на db-слое; здесь — честный ответ).
+                saved["memory_status"] = "profile_protected"
             else:
                 # мягкое удаление — как кнопка «Удалить» на /memory
                 db.update_memory(mid, status="inactive")
@@ -742,6 +747,12 @@ def api_update_memory(memory_id: int, body: dict):
         if body["status"] not in MEMORY_STATUSES:
             return JSONResponse(status_code=400, content={"error": "bad_status"})
         clean["status"] = body["status"]
+    # Защита профиля: заметку из папки "Профиль" нельзя деактивировать (= удалить),
+    # только редактировать (title/content/folder проходят).
+    if clean.get("status") == "inactive" and db.is_profile_note(memory_id):
+        return JSONResponse(status_code=403, content={
+            "error": "profile_protected",
+            "message": "Заметку профиля нельзя удалить, только редактировать"})
     row = db.update_memory(memory_id, **clean)
     if not row:
         return JSONResponse(status_code=404, content={"error": "not_found"})
@@ -750,6 +761,11 @@ def api_update_memory(memory_id: int, body: dict):
 
 @app.delete("/api/memory/{memory_id}")
 def api_delete_memory(memory_id: int):
+    # Защита профиля: заметку из папки "Профиль" удалять нельзя.
+    if db.is_profile_note(memory_id):
+        return JSONResponse(status_code=403, content={
+            "error": "profile_protected",
+            "message": "Заметку профиля нельзя удалить, только редактировать"})
     db.delete_memory(memory_id)
     return {"ok": True}
 

@@ -633,6 +633,9 @@ def init_db():
             )
         conn.commit()
 
+    # Защищённая заметка профиля: создаём, если в папке 'Профиль' ещё ничего нет.
+    ensure_profile_exists()
+
     engine = "PostgreSQL" if _PG else "SQLite"
     print(f"DB: {engine} ready")
 
@@ -1314,6 +1317,16 @@ def clear_pending_suggestions(chat_id: str) -> None:
 
 _MEMORY_FIELDS = {"title", "content", "folder", "status"}
 
+# Защищённый профиль: заметки этой папки всегда инжектятся в контекст и не
+# удаляются (только редактируются). «Профиль» — обычная папка (folder), отдельной
+# колонки pinned/system нет; принадлежность к профилю определяется по folder.
+PROFILE_FOLDER = "Профиль"
+_PROFILE_TITLE = "Профиль пользователя"
+_PROFILE_PLACEHOLDER = (
+    "Здесь можно описать себя: имя, роль, предпочтения по стилю ответов, "
+    "любимые инструменты, ограничения."
+)
+
 # Wiki-ссылка [[Заголовок]] или [[Заголовок|алиас]] в markdown-теле заметки.
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
@@ -1367,6 +1380,54 @@ def find_active_memory_by_title(title: str) -> dict | None:
             (norm,),
         )
         return _fetchone(cur)
+
+
+# ── Профиль (защищённые заметки папки 'Профиль') ──
+
+def get_pinned_memory(folder: str = PROFILE_FOLDER) -> list[dict]:
+    """ВСЕ active-заметки из указанной папки (по умолчанию 'Профиль'). Для
+    безусловного инжекта профиля в контекст агента. Свежие сверху."""
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT {_MEMORY_COLS} FROM long_term_memory "
+            f"WHERE status='active' AND folder={_P} ORDER BY updated_at DESC",
+            (folder,),
+        )
+        return _fetchall(cur)
+
+
+def ensure_profile_exists():
+    """Гарантирует наличие хотя бы одной active-заметки профиля (папка 'Профиль').
+    Если её нет — создаёт одну с placeholder-текстом. Идемпотентно; вызывается из
+    init_db. Проверка ведётся по папке (а не по title): если юзер сознательно увёл
+    заметку профиля в другую папку, папка 'Профиль' опустеет и здесь создастся
+    новая — это ок (см. урок 12)."""
+    now = time.time()
+    with _connect() as conn:
+        cur = _execute(
+            conn,
+            f"SELECT 1 FROM long_term_memory "
+            f"WHERE status='active' AND folder={_P} LIMIT 1",
+            (PROFILE_FOLDER,),
+        )
+        if _fetchone(cur):
+            return
+        _execute(
+            conn,
+            f"INSERT INTO long_term_memory "
+            f"(title, content, folder, status, created_at, updated_at) "
+            f"VALUES ({_P},{_P},{_P},'active',{_P},{_P})",
+            (_PROFILE_TITLE, _PROFILE_PLACEHOLDER, PROFILE_FOLDER, now, now),
+        )
+        conn.commit()
+
+
+def is_profile_note(memory_id: int) -> bool:
+    """True, если заметка существует и лежит в защищённой папке 'Профиль'.
+    Единый источник истины для защиты от удаления (API-эндпоинты и путь агента)."""
+    row = get_memory(memory_id)
+    return bool(row) and row.get("folder") == PROFILE_FOLDER
 
 
 # ── Материализованный граф связей [[..]] (memory_links) ──
@@ -1464,6 +1525,11 @@ def update_memory(memory_id: int, **fields) -> dict | None:
     """Whitelist {title, content, folder, status}. Всегда обновляет updated_at.
     Возвращает обновлённую запись или None, если id не найден. Любое изменение
     (в т.ч. title/status) ре-материализует граф связей."""
+    # Защита профиля (db-слой, закрывает и путь агента): заметку из папки 'Профиль'
+    # нельзя деактивировать (= мягко удалить) — но редактировать можно. Снимаем
+    # только status=inactive, остальные поля применяются как обычно.
+    if fields.get("status") == "inactive" and is_profile_note(memory_id):
+        fields = {k: v for k, v in fields.items() if k != "status"}
     sets = []
     vals = []
     for k, v in fields.items():
@@ -1515,11 +1581,16 @@ def merge_memory_content(title: str, content: str) -> tuple[dict | None, str]:
     return update_memory(existing["id"], content=merged), "merged"
 
 
-def delete_memory(memory_id: int):
-    """Физическое удаление (для крайних случаев; основной способ — status=inactive)."""
+def delete_memory(memory_id: int) -> bool:
+    """Физическое удаление (для крайних случаев; основной способ — status=inactive).
+    Заметку профиля (папка 'Профиль') не удаляет → возвращает False; иначе удаляет и
+    возвращает True (защита db-слоя, закрывает и путь агента)."""
+    if is_profile_note(memory_id):
+        return False
     with _connect() as conn:
         _execute(conn, f"DELETE FROM long_term_memory WHERE id={_P}", (memory_id,))
         conn.commit()
+    return True
 
 
 def get_memory_links() -> list[dict]:

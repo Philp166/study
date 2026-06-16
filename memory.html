@@ -738,6 +738,8 @@
       currentTask = null;
       dossierLbl.textContent = note ? "Заметка" : "Новая заметка";
       const folderVal = note && note.folder ? note.folder : "";
+      // Заметка профиля (папка «Профиль») защищена: удалять нельзя, только править.
+      const isProfile = !!(note && note.folder === "Профиль");
       const known = [...new Set([...folders, ...localFolders])].sort((a, b) => a.localeCompare(b, "ru"));
       const dlOpts = known.map((f) => '<option value="' + escapeAttr(f) + '"></option>').join("");
       const backs = note ? backlinksFor(note.id) : [];
@@ -752,7 +754,7 @@
             "</div></div>"
           : "") +
         '<div class="dossier-actions"><button id="d-save" class="btn btn-primary">' + (note ? "Сохранить" : "Создать") + "</button>" +
-        (note ? '<button id="d-del" class="btn btn-danger">Удалить</button>' : "") + "</div>" +
+        (note && !isProfile ? '<button id="d-del" class="btn btn-danger">Удалить</button>' : "") + "</div>" +
         (note ? '<div class="dossier-dates">Создано: ' + fmt(note.created_at) + "<br>Обновлено: " + fmt(note.updated_at) + "</div>" : "");
 
       const contentEl = byId("d-content"), prev = byId("d-preview");
@@ -767,7 +769,7 @@
         chip.addEventListener("click", () => openNote(Number(chip.dataset.id)));
       });
       byId("d-save").addEventListener("click", saveNote);
-      if (note) byId("d-del").addEventListener("click", deleteNote);
+      if (note && !isProfile) byId("d-del").addEventListener("click", deleteNote);
       openDossier();
     }
 

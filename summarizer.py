@@ -53,6 +53,7 @@ def build_system_prompt(
     facts: list[dict] | None = None,
     memory_block: str | None = None,
     tasks_block: str | None = None,
+    profile_block: str | None = None,
 ) -> str:
     """base_prompt + долговременная память + задачи + summary + факты.
 
@@ -61,6 +62,10 @@ def build_system_prompt(
     """
     parts = [base_prompt]
 
+    # Профиль идёт первым (после base): самые стабильные сведения о юзере, грузятся
+    # всегда — перед релевантной памятью, задачами, summary и фактами.
+    if profile_block:
+        parts.append(profile_block)
     if memory_block:
         parts.append(memory_block)
     if tasks_block:
@@ -308,6 +313,16 @@ def _estimate_tokens(text: str) -> int:
     return (len(text) + 1) // 2
 
 
+def _render_profile_block(notes: list[dict]) -> str:
+    """Блок профиля (папка 'Профиль'): полный content каждой заметки. Грузится
+    всегда и первым; формат зеркалит блок долговременной памяти."""
+    lines = ["\n\n# Профиль пользователя\n"]
+    for n in notes:
+        content = n.get("content") or ""
+        lines.append(f"\n## {n['title']}" + ("\n" + content if content else ""))
+    return "".join(lines)
+
+
 def _render_memory_block(notes: list[dict], content_cap: int | None = None) -> str:
     lines = ["\n\n# Долговременная память\n"]
     for n in notes:
@@ -335,9 +350,12 @@ def _render_tasks_block(tasks: list[dict], total: int | None = None) -> str:
 
 
 def build_memory_blocks(
-    notes: list[dict], tasks: list[dict], tasks_total: int | None = None
+    notes: list[dict], tasks: list[dict], tasks_total: int | None = None,
+    budget: int = MEMORY_TOKEN_BUDGET,
 ) -> tuple[str | None, str | None]:
-    """Строит (memory_block, tasks_block) под токен-бюджет MEMORY_TOKEN_BUDGET.
+    """Строит (memory_block, tasks_block) под токен-бюджет budget (по умолчанию
+    MEMORY_TOKEN_BUDGET). Профиль грузится отдельно и первым — на релевантную память
+    и задачи остаётся budget = MEMORY_TOKEN_BUDGET - профиль.
 
     Урезание при переполнении: (1) контент заметок → 100 симв; (2) выкидываем
     заметки с конца (они отсортированы по релевантности/свежести). Задачи приходят
@@ -353,11 +371,11 @@ def build_memory_blocks(
         return None, tasks_block
 
     mem = _render_memory_block(notes)
-    if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+    if _estimate_tokens(mem) + tasks_tokens <= budget:
         return mem, tasks_block
 
     mem = _render_memory_block(notes, content_cap=100)
-    if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+    if _estimate_tokens(mem) + tasks_tokens <= budget:
         return mem, tasks_block
 
     kept = list(notes)
@@ -366,7 +384,7 @@ def build_memory_blocks(
         if not kept:
             return None, tasks_block
         mem = _render_memory_block(kept, content_cap=100)
-        if _estimate_tokens(mem) + tasks_tokens <= MEMORY_TOKEN_BUDGET:
+        if _estimate_tokens(mem) + tasks_tokens <= budget:
             return mem, tasks_block
     return None, tasks_block
 
@@ -420,16 +438,27 @@ def prepare_context(
     # D: история ветки (Sliding Window убран в Фазе 5 — Rolling Summary его покрывает)
     messages = [{"role": m["role"], "content": m["content"]} for m in recent]
 
-    # E0: Долговременная память + активные задачи (глобальные, между чатами).
-    # Только для текстового пути (inject_memory=True). Память НЕ влияет на порог
-    # суммаризации (maybe_summarize строит промпт без этих блоков).
-    memory_block = tasks_block = None
+    # E0: Профиль + долговременная память + активные задачи (глобальные, между
+    # чатами). Только для текстового пути (inject_memory=True). Память НЕ влияет на
+    # порог суммаризации (maybe_summarize строит промпт без этих блоков).
+    # Порядок бюджета (всего MEMORY_TOKEN_BUDGET): профиль первым (грузится всегда),
+    # остаток — релевантная память + задачи.
+    memory_block = tasks_block = profile_block = None
     if inject_memory:
+        # 1) Профиль: ВСЕ active-заметки папки 'Профиль', без капа, первым в бюджете.
+        profile_notes = db.get_pinned_memory()
+        profile_ids = {n["id"] for n in profile_notes}
+        profile_block = _render_profile_block(profile_notes) if profile_notes else None
+        profile_tokens = _estimate_tokens(profile_block) if profile_block else 0
+
+        # 2) Релевантная память — исключая заметки профиля (уже в блоке профиля).
         notes = db.relevant_memory(user_message or "", limit=5)
+        notes = [n for n in notes if n["id"] not in profile_ids]
         all_active = db.list_tasks(status="active")          # уже DESC по updated_at
         active_tasks = all_active[:MAX_INJECTED_TASKS]       # кап: не вытесняем заметки
         memory_block, tasks_block = build_memory_blocks(
-            notes, active_tasks, tasks_total=len(all_active))
+            notes, active_tasks, tasks_total=len(all_active),
+            budget=MEMORY_TOKEN_BUDGET - profile_tokens)
 
     # E: Build system prompt with branch-active facts
     facts = None
@@ -441,6 +470,7 @@ def prepare_context(
     system_prompt = build_system_prompt(
         base_system_prompt, summary_text, facts,
         memory_block=memory_block, tasks_block=tasks_block,
+        profile_block=profile_block,
     )
 
     return system_prompt, messages

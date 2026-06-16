@@ -634,7 +634,8 @@ def test_resolve_voice_pending_drops_on_no(fresh_db):
         {"task": None, "memory": {"action": "create", "title": "X", "content": "y"}}])
     assert app._resolve_voice_pending(cid, "нет, потом") == []
     assert db.get_pending_suggestions(cid) == []    # явный отказ очищает
-    assert db.list_memory() == []                   # не записано
+    assert db.list_memory(q="X") == []              # предложение не записано
+    # (БД не пуста: init_db создаёт защищённую заметку профиля — см. урок 12)
 
 
 def test_resolve_voice_pending_absent(fresh_db):
